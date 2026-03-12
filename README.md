@@ -1,0 +1,147 @@
+# Doc-Loop
+
+`docloop.py` is a minimal CLI orchestrator for iterative document refinement. It creates a small workspace on disk, runs a writer-verifier Codex loop, and uses git commits as checkpoints between iterations. It supports both a general refinement mode and a dedicated update mode for applying requested changes to an existing SAD or PRD.
+
+## What It Does
+
+- Checks that `git` and `codex` are available in `PATH`.
+- Resolves an output target file, defaulting to `./SAD.md` or `./PRD.md` in the current directory.
+- Creates a `.docloop/` workspace with writer prompt, verifier prompt, criteria, progress, and context files next to the output target.
+- Seeds the target markdown document from `--input-text` or `--input-file` when provided.
+- Supports `--update` mode with `--update-text`, a frozen baseline snapshot, and dedicated writer/verifier prompts for change requests.
+- Initializes a local git repository in the output workspace if no repository already exists there or above it.
+- Repeatedly runs `codex exec` twice per cycle: once as the writer and once as the verifier.
+- Parses the agent's final stdout for control tags:
+  - `<question>...</question>` pauses for human input and appends the answer to `.docloop/context.md`.
+  - `<promise>COMPLETE</promise>` ends the loop successfully, but only when emitted by the verifier.
+- Makes the verifier update `.docloop/criteria.md` and write actionable feedback to `.docloop/progress.txt` when the document is not ready.
+- Commits baseline state, pre-cycle snapshots, writer edits, verifier feedback, human clarifications, and successful completion markers to git.
+
+## Requirements
+
+- Python 3
+- `git`
+- `codex`
+
+The script expects `codex` to support this execution pattern:
+
+```bash
+codex exec --ephemeral --full-auto --model MODEL -
+```
+
+## Usage
+
+Run the script from the directory where you want the default output file to be created:
+
+```bash
+python3 docloop.py
+```
+
+Options:
+
+- `--type {SAD,PRD}`: Selects the default target document name. Default: `SAD`
+- `--max-iterations N`: Maximum loop count before failing. Default: `15`
+- `--model MODEL`: Codex model passed through to `codex exec`. Default: `gpt-5.4`
+- `--update`: Update an existing target document using explicit change instructions
+- `--update-text TEXT`: Requested document updates to apply when `--update` is set
+- `--input-text TEXT`: Seed the output document from inline text
+- `--input-file PATH`: Seed the output document from a file
+- `-o`, `-output`, `--output`: Output file or directory. Default: `./SAD.md` or `./PRD.md`
+
+Example:
+
+```bash
+python3 docloop.py --input-file ./notes/source.md --output ./reports/
+```
+
+```bash
+python3 docloop.py --type PRD --input-text "# Draft PRD" --output ./prd-review.md
+```
+
+```bash
+python3 docloop.py --update --update-text "Add offline deployment constraints and clarify backward compatibility." --output ./SAD.md
+```
+
+## Workspace Layout
+
+On first run, the script creates the workspace next to the resolved output target. For example, with the default output in the current directory:
+
+```text
+.docloop/
+  prompt.md
+  verifier_prompt.md
+  criteria.md
+  update_prompt.md
+  update_verifier_prompt.md
+  update_criteria.md
+  update_request.md
+  update_baseline.md
+  progress.txt
+  context.md
+SAD.md or PRD.md
+```
+
+File roles:
+
+- `.docloop/prompt.md`: Writer instructions sent to Codex for the write pass.
+- `.docloop/verifier_prompt.md`: Verifier instructions sent to Codex for the verification pass.
+- `.docloop/criteria.md`: Verifier-owned checklist for implementation-ready completeness, consistency, and ambiguity control.
+- `.docloop/update_prompt.md`: Writer instructions used only in update mode.
+- `.docloop/update_verifier_prompt.md`: Verifier instructions used only in update mode.
+- `.docloop/update_criteria.md`: Verifier-owned checklist for requested-change coverage and regression control in update mode.
+- `.docloop/update_request.md`: The requested document changes for the current update run.
+- `.docloop/update_baseline.md`: Frozen pre-update target snapshot used to detect unintended regressions.
+- `.docloop/progress.txt`: Append-only writer/verifier handoff log and system warnings.
+- `.docloop/context.md`: Human requirements, implementation constraints, and later clarification answers.
+- `SAD.md` / `PRD.md` or your custom `--output` file: The target document being refined.
+
+Output rules:
+
+- No `--output`: write `./SAD.md` or `./PRD.md` in the current directory.
+- `--output path/to/file.md`: write exactly that file and place `.docloop/` beside it.
+- `--output path/to/dir` or `--output path/to/dir/`: write `path/to/dir/SAD.md` or `path/to/dir/PRD.md`.
+
+## Loop Behavior
+
+For each cycle, `docloop.py`:
+
+1. Stages and commits the current target document and `.docloop/` state as a pre-cycle snapshot.
+2. Runs the writer using `.docloop/prompt.md` with the full workspace context.
+3. If the writer asks a question, the human answer is appended to `.docloop/context.md`, committed, and the cycle restarts.
+4. Commits any writer edits, then runs the verifier using `.docloop/verifier_prompt.md` against the same full workspace context.
+5. If the verifier asks a question, the human answer is appended to `.docloop/context.md`, committed, and the cycle restarts.
+6. If the verifier does not pass the document, it must update `.docloop/criteria.md` and append actionable feedback to `.docloop/progress.txt` for the writer, then the next cycle begins.
+7. If the verifier emits `<promise>COMPLETE</promise>`, the final state is committed and the script exits `0`.
+
+The script sleeps for two seconds between iterations as a cooldown.
+
+## Update Mode
+
+When `--update` is enabled:
+
+1. `--update-text` is required.
+2. The target document must already exist unless you also seed it with `--input-text` or `--input-file`.
+3. Doc-Loop writes the requested change text to `.docloop/update_request.md`.
+4. Doc-Loop snapshots the pre-update target into `.docloop/update_baseline.md`.
+5. The writer and verifier switch to `.docloop/update_prompt.md`, `.docloop/update_verifier_prompt.md`, and `.docloop/update_criteria.md`.
+
+Update-mode questions are stricter:
+
+- The writer and verifier are instructed to ask clarifying questions when a requested change is breaking, ambiguous, likely to introduce regressions, or likely to be misunderstood.
+- Every such question must include the agent's best supposition immediately beside the question so the human can confirm or correct it quickly.
+
+## Exit Conditions
+
+- Success: the verifier emits `<promise>COMPLETE</promise>`, and the script exits `0`.
+- Failure: the maximum iteration count is reached without completion, and the script exits `1`.
+- Interrupt: `Ctrl+C` exits gracefully with code `130`.
+- Fatal dependency or git errors cause immediate exit via `sys.exit(1)`.
+
+## Notes
+
+- The script only tracks the target markdown file and `.docloop/` content when creating commits.
+- If `--input-text` or `--input-file` is provided, the resolved output document is overwritten with that seed content before the loop starts.
+- Git commits are skipped when there is nothing to commit.
+- Human clarifications are appended to `.docloop/context.md`; they do not overwrite prior context.
+- The writer and verifier both read the same full workspace context; the verifier is not run on a reduced or clean-room context.
+- Update mode uses the same full context plus `.docloop/update_request.md` and `.docloop/update_baseline.md`.
