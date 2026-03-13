@@ -13,8 +13,12 @@
 - Repeatedly runs `codex exec` twice per cycle: once as the writer and once as the verifier.
 - Parses the agent's final stdout for control tags:
   - `<question>...</question>` pauses for human input and appends the answer to `.docloop/context.md`.
-  - `<promise>COMPLETE</promise>` ends the loop successfully, but only when emitted by the verifier.
-- Makes the verifier update `.docloop/criteria.md` and write actionable feedback to `.docloop/progress.txt` when the document is not ready.
+  - The last non-empty line may be a verifier promise tag:
+    - `<promise>COMPLETE</promise>` ends the loop successfully.
+    - `<promise>INCOMPLETE</promise>` means another writer cycle is required.
+    - `<promise>BLOCKED</promise>` means the verifier cannot proceed safely and the script exits blocked.
+  - If the verifier omits a promise tag, Doc-Loop defaults that pass to `<promise>INCOMPLETE</promise>` and appends this warning to `.docloop/progress.txt`: `No promise tag found, defaulted to <promise>INCOMPLETE</promise>`.
+- Makes the verifier update `.docloop/criteria.md` and write actionable feedback to `.docloop/progress.txt` when the document is not ready, balancing completeness against redundancy and unnecessary implementation detail.
 - Commits baseline state, pre-cycle snapshots, writer edits, verifier feedback, human clarifications, and successful completion markers to git.
 
 ## Requirements
@@ -85,10 +89,10 @@ File roles:
 
 - `.docloop/prompt.md`: Writer instructions sent to Codex for the write pass.
 - `.docloop/verifier_prompt.md`: Verifier instructions sent to Codex for the verification pass.
-- `.docloop/criteria.md`: Verifier-owned checklist for implementation-ready completeness, consistency, and ambiguity control.
+- `.docloop/criteria.md`: Verifier-owned checklist for implementation-ready completeness, clarity, single-source-of-truth discipline, and appropriate abstraction level.
 - `.docloop/update_prompt.md`: Writer instructions used only in update mode.
 - `.docloop/update_verifier_prompt.md`: Verifier instructions used only in update mode.
-- `.docloop/update_criteria.md`: Verifier-owned checklist for requested-change coverage and regression control in update mode.
+- `.docloop/update_criteria.md`: Verifier-owned checklist for requested-change coverage, regression control, single-source-of-truth discipline, and appropriate abstraction level in update mode.
 - `.docloop/update_request.md`: The requested document changes for the current update run.
 - `.docloop/update_baseline.md`: Frozen pre-update target snapshot used to detect unintended regressions.
 - `.docloop/progress.txt`: Append-only writer/verifier handoff log and system warnings.
@@ -111,7 +115,9 @@ For each cycle, `docloop.py`:
 4. Commits any writer edits, then runs the verifier using `.docloop/verifier_prompt.md` against the same full workspace context.
 5. If the verifier asks a question, the human answer is appended to `.docloop/context.md`, committed, and the cycle restarts.
 6. If the verifier does not pass the document, it must update `.docloop/criteria.md` and append actionable feedback to `.docloop/progress.txt` for the writer, then the next cycle begins.
-7. If the verifier emits `<promise>COMPLETE</promise>`, the final state is committed and the script exits `0`.
+7. If the verifier's last non-empty line is `<promise>COMPLETE</promise>`, the final state is committed and the script exits `0`.
+8. If the verifier's last non-empty line is `<promise>INCOMPLETE</promise>`, the verifier feedback is committed and the next cycle begins.
+9. If the verifier's last non-empty line is `<promise>BLOCKED</promise>`, the verifier feedback is committed and the script exits blocked.
 
 The script sleeps for two seconds between iterations as a cooldown.
 
@@ -132,10 +138,18 @@ Update-mode questions are stricter:
 
 ## Exit Conditions
 
-- Success: the verifier emits `<promise>COMPLETE</promise>`, and the script exits `0`.
+- Success: the verifier's last non-empty line is `<promise>COMPLETE</promise>`, and the script exits `0`.
+- Blocked: the verifier's last non-empty line is `<promise>BLOCKED</promise>`, and the script exits `2`.
 - Failure: the maximum iteration count is reached without completion, and the script exits `1`.
 - Interrupt: `Ctrl+C` exits gracefully with code `130`.
 - Fatal dependency or git errors cause immediate exit via `sys.exit(1)`.
+
+## Promise Tag Rules
+
+- Promise tags are verifier-only. The writer must not emit any `<promise>...</promise>` tag.
+- A promise tag is only recognized when it is the last non-empty line of verifier stdout, exactly.
+- Mentioning a promise tag in ordinary prose does not count as a control signal.
+- If no verifier promise tag is present, Doc-Loop treats that verifier pass as `INCOMPLETE` and appends a system warning to `.docloop/progress.txt`, which is part of the next cycle's working-set prompt.
 
 ## Notes
 
