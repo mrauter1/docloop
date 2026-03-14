@@ -159,3 +159,93 @@ Update-mode questions are stricter:
 - Human clarifications are appended to `.docloop/context.md`; they do not overwrite prior context.
 - The writer and verifier both read the same full workspace context; the verifier is not run on a reduced or clean-room context.
 - Update mode uses the same full context plus `.docloop/update_request.md` and `.docloop/update_baseline.md`.
+
+
+## Superloop (Strategy-to-Execution)
+
+This repository also includes `superloop.py`, a Codex-native orchestrator for optional, chained producer/verifier loop pairs inspired by Doc-Loop control signals.
+
+### Goals
+
+- Turn broad product intent into shipped, reviewed, and tested changes.
+- Preserve low-friction control through the same tags:
+  - `<question>...</question>` for clarification handoff
+  - verifier final line `<promise>COMPLETE|INCOMPLETE|BLOCKED</promise>`
+
+### Optional loop pairs
+
+`superloop.py` supports three optional pairs (in fixed order):
+
+1. `plan`: Plan ↔ Plan Verifier
+2. `implement`: Implement ↔ Code Reviewer
+3. `test`: Test Author ↔ Test Auditor
+
+Use `--pairs` to choose any subset, for example only implementation review:
+
+```bash
+python3 superloop.py --pairs implement
+```
+
+Run all pairs (default):
+
+```bash
+python3 superloop.py --pairs plan,implement,test
+```
+
+### Common options
+
+- `--workspace PATH`: Repository root to operate on (default `.`)
+- `--max-iterations N`: Maximum verifier cycles per enabled pair (default `8`)
+- `--model MODEL`: Codex model passed to `codex exec` (default `gpt-5.4`)
+- `--intent TEXT`: Optional initial product intent seeded into `.superloop/context.md`
+- `--full-auto-answers`: Automatically answer `<question>` prompts through an extra Codex pass
+
+`--pairs` validation notes:
+
+- Each pair name must be from `plan`, `implement`, `test`.
+- Duplicate pair names are rejected (for example `--pairs implement,implement` fails fast).
+
+### Superloop workspace layout
+
+`superloop.py` creates `.superloop/` under the workspace root:
+
+```text
+.superloop/
+  context.md
+  run_log.md
+  plan/
+    prompt.md
+    verifier_prompt.md
+    criteria.md
+    feedback.md
+    plan.md
+    milestones.md
+    interfaces.md
+    risk_register.md
+  implement/
+    prompt.md
+    verifier_prompt.md
+    criteria.md
+    feedback.md
+    implementation_notes.md
+    review_findings.md
+  test/
+    prompt.md
+    verifier_prompt.md
+    criteria.md
+    feedback.md
+    test_strategy.md
+    test_gaps.md
+```
+
+Like Doc-Loop, Superloop checkpoints progress with git commits throughout execution.
+
+Superloop commit scope and verifier protections:
+
+- Superloop always persists `.superloop/` run artifacts and also commits phase output deltas, so durable code/test artifacts can live anywhere in the repository.
+- Question-path safety checks are phase-local and based on Git snapshot diffs (including newly created files), so pre-existing unrelated repo changes do not falsely trip `<question>` handling.
+- Verifier write scope is checked per pair and reported as warnings in lax-guard mode (execution continues):
+  - `plan` verifier may only edit `.superloop/plan/`
+  - `implement` verifier may only edit `.superloop/implement/`
+  - `test` verifier may only edit `.superloop/test/`
+- If a verifier emits `COMPLETE` while criteria checkboxes remain unchecked, Superloop warns and downgrades that pass to `INCOMPLETE`.
