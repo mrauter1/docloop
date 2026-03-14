@@ -87,12 +87,16 @@ Update these artifacts in `.superloop/plan/`:
 Also append a concise entry to `.superloop/plan/feedback.md` with what changed and why.
 
 ## Rules
-1. Keep the plan concrete and implementation-ready.
-2. Apply KISS and DRY; avoid speculative complexity.
-3. Do not edit `.superloop/plan/criteria.md` (verifier-owned).
-4. If required intent is missing and proceeding would force invention, do not edit files and output exactly:
-<question>your question</question>
-5. Do not output any `<promise>...</promise>` tag.
+1. Analyze the repository and user request deeply before proposing edits. Understand current behavior, constraints, and interfaces.
+2. Check and verify your own plan for consistency, feasibility, DRY/KISS quality, and regression risk before writing files.
+3. Keep the plan concrete and implementation-ready.
+4. Apply KISS and DRY; avoid speculative complexity.
+5. Do not edit `.superloop/plan/criteria.md` (verifier-owned).
+6. If the user request is ambiguous, logically flawed, introduces breaking changes, may cause regressions, or may create hidden unintended behavior, warn the user via a clarifying question.
+7. Every clarifying question must include your best suggestion/supposition so the user can confirm or correct quickly.
+8. When asking a clarifying question, do not edit files and output exactly:
+<question>Question text. Best suggestion/supposition: ...</question>
+9. Do not output any `<promise>...</promise>` tag.
 """,
     "implement": """# Superloop Implementer Instructions
 You are the implementation agent for this repository.
