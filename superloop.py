@@ -383,9 +383,9 @@ def commit_tracked_changes(root: Path, message: str, tracked_paths: Optional[Seq
     return commit_paths(root, message, tracked)
 
 
-def check_dependencies():
+def check_dependencies(require_git: bool = True):
     missing = []
-    if not shutil.which("git"):
+    if require_git and not shutil.which("git"):
         missing.append("git")
     if not shutil.which("codex"):
         missing.append("codex (install via 'npm i -g @openai/codex')")
@@ -405,9 +405,23 @@ def resolve_codex_exec_command(model: str) -> List[str]:
         fatal(f"[!] FATAL CODEX ERROR: {details}")
 
     help_text = f"{help_result.stdout}\n{help_result.stderr}"
-    if "--full-auto" in help_text:
-        return ["codex", "exec", "--ephemeral", "--full-auto", "--model", model, "-"]
-    fatal("[!] FATAL CODEX ERROR: This Superloop version requires `codex exec --full-auto` support.")
+    missing_flags = [flag for flag in ("--full-auto", "--dangerously-bypass-approvals-and-sandbox") if flag not in help_text]
+    if missing_flags:
+        fatal(
+            "[!] FATAL CODEX ERROR: This Superloop version requires `codex exec` support for: "
+            + ", ".join(missing_flags)
+        )
+
+    return [
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        model,
+        "-",
+    ]
 
 
 def parse_pairs(pairs_arg: str, max_iterations: int) -> List[PairConfig]:
@@ -596,6 +610,7 @@ def main():
     parser.add_argument("--workspace", type=str, default=".", help="Repository/workspace root")
     parser.add_argument("--intent", type=str, help="Optional initial product intent text")
     parser.add_argument("--full-auto-answers", action="store_true", help="Auto-answer agent questions using an extra Codex pass")
+    parser.add_argument("--no-git", action="store_true", help="Do not initialize git or create git commits/checkpoints")
     args = parser.parse_args()
 
     if args.max_iterations < 1:
@@ -605,21 +620,27 @@ def main():
     if not root.exists() or not root.is_dir():
         fatal(f"[!] FATAL: --workspace must be an existing directory: {root}")
 
-    check_dependencies()
+    use_git = not args.no_git
+    if use_git and not shutil.which("git"):
+        warn("git is not installed; forcing --no-git mode.")
+        use_git = False
+    check_dependencies(require_git=use_git)
     codex_command = resolve_codex_exec_command(args.model)
     pair_configs = parse_pairs(args.pairs, args.max_iterations)
 
-    repo_exists = has_git_repo(root)
-    if not repo_exists:
-        print("[*] Initializing local Git repository...")
-        run_git(["init"], cwd=root)
-        run_git(["config", "user.name", "Superloop Agent"], cwd=root)
-        run_git(["config", "user.email", "superloop@localhost"], cwd=root)
+    if use_git:
+        repo_exists = has_git_repo(root)
+        if not repo_exists:
+            print("[*] Initializing local Git repository...")
+            run_git(["init"], cwd=root)
+            run_git(["config", "user.name", "Superloop Agent"], cwd=root)
+            run_git(["config", "user.email", "superloop@localhost"], cwd=root)
 
-    ensure_git_commit_ready(root)
+        ensure_git_commit_ready(root)
     paths = ensure_workspace(root, args.intent)
 
-    commit_tracked_changes(root, "superloop: baseline")
+    if use_git:
+        commit_tracked_changes(root, "superloop: baseline")
 
     print("\n[+] Starting Superloop")
     print(f"[*] Workspace root: {root}")
@@ -645,26 +666,24 @@ def main():
                 cycle_num = cycle + 1
                 print(f"\n--- {pair} cycle {cycle_num}/{pair_cfg.max_iterations} ---")
                 pair_tracked = tracked_superloop_paths(pair)
-                commit_tracked_changes(root, f"superloop: pre-cycle snapshot ({pair} #{cycle_num})", pair_tracked)
+                if use_git:
+                    commit_tracked_changes(root, f"superloop: pre-cycle snapshot ({pair} #{cycle_num})", pair_tracked)
 
-                producer_baseline = phase_snapshot_ref(root)
+                producer_baseline = phase_snapshot_ref(root) if use_git else None
 
                 producer_stdout = run_codex_phase(codex_command, root, prompt_file, "producer", pair)
                 producer_question, producer_promise = extract_control_tags(producer_stdout)
-                producer_delta = changed_paths_from_snapshot(root, producer_baseline)
+                producer_delta = changed_paths_from_snapshot(root, producer_baseline) if use_git else set()
 
                 if producer_question:
-                    if producer_delta:
-                        warn(
-                            f"{pair} producer emitted <question> after editing files in this phase; proceeding in lax guard mode."
-                        )
                     if args.full_auto_answers:
                         answer = auto_answer_question(codex_command, root, paths["context_file"], producer_question)
                         print(f"[+] Auto-answered producer question: {answer}")
                     else:
                         answer = ask_human(producer_question)
                     append_clarification(paths["context_file"], pair, "producer", cycle_num, producer_question, answer)
-                    commit_tracked_changes(root, f"superloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
+                    if use_git:
+                        commit_tracked_changes(root, f"superloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
                     continue
 
                 if producer_promise:
@@ -672,33 +691,33 @@ def main():
                         f"{pair} producer emitted <promise>{producer_promise}</promise>; ignoring because verifier controls completion."
                     )
 
-                if producer_delta:
+                if use_git and producer_delta:
                     commit_paths(root, f"superloop: producer edits ({pair} #{cycle_num})", producer_delta)
                 else:
-                    print("[-] Producer made no changes.")
+                    if use_git:
+                        print("[-] Producer made no changes.")
+                    else:
+                        print("[-] Change detection skipped in --no-git mode.")
 
-                verifier_baseline = phase_snapshot_ref(root)
+                verifier_baseline = phase_snapshot_ref(root) if use_git else None
 
                 verifier_stdout = run_codex_phase(codex_command, root, verifier_prompt_file, "verifier", pair)
                 verifier_question, verifier_promise = extract_control_tags(verifier_stdout)
-                verifier_delta = changed_paths_from_snapshot(root, verifier_baseline)
+                verifier_delta = changed_paths_from_snapshot(root, verifier_baseline) if use_git else set()
 
                 if verifier_question:
-                    if verifier_delta:
-                        warn(
-                            f"{pair} verifier emitted <question> after editing files in this phase; proceeding in lax guard mode."
-                        )
                     if args.full_auto_answers:
                         answer = auto_answer_question(codex_command, root, paths["context_file"], verifier_question)
                         print(f"[+] Auto-answered verifier question: {answer}")
                     else:
                         answer = ask_human(verifier_question)
                     append_clarification(paths["context_file"], pair, "verifier", cycle_num, verifier_question, answer)
-                    commit_tracked_changes(root, f"superloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
+                    if use_git:
+                        commit_tracked_changes(root, f"superloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
                     continue
 
-                violations = verifier_scope_violations(pair, verifier_delta)
-                if violations:
+                violations = verifier_scope_violations(pair, verifier_delta) if use_git else []
+                if use_git and violations:
                     preview = ", ".join(violations[:8])
                     if len(violations) > 8:
                         preview += ", ..."
@@ -726,27 +745,34 @@ def main():
                 if verifier_promise == PROMISE_COMPLETE:
                     print(f"[SUCCESS] Pair `{pair}` completed.")
                     append_run_log(paths["run_log"], f"Completed pair `{pair}` in {cycle_num} cycles")
-                    commit_paths(root, f"superloop: pair complete ({pair})", set(pair_tracked) | verifier_delta)
+                    if use_git:
+                        commit_paths(root, f"superloop: pair complete ({pair})", set(pair_tracked) | verifier_delta)
                     break
 
                 if verifier_promise == PROMISE_BLOCKED:
                     append_run_log(paths["run_log"], f"Blocked in pair `{pair}` cycle {cycle_num}")
-                    commit_paths(root, f"superloop: blocked ({pair} #{cycle_num})", set(pair_tracked) | verifier_delta)
+                    if use_git:
+                        commit_paths(root, f"superloop: blocked ({pair} #{cycle_num})", set(pair_tracked) | verifier_delta)
                     print(f"[BLOCKED] Pair `{pair}` emitted BLOCKED.", file=sys.stderr)
                     sys.exit(2)
 
                 # INCOMPLETE
-                commit_paths(root, f"superloop: verifier feedback ({pair} #{cycle_num})", verifier_delta)
+                if use_git:
+                    commit_paths(root, f"superloop: verifier feedback ({pair} #{cycle_num})", verifier_delta)
+                else:
+                    print("[-] Change detection skipped in --no-git mode.")
                 cycle += 1
                 time.sleep(2)
             else:
                 append_run_log(paths["run_log"], f"Failed pair `{pair}` after max cycles")
-                commit_paths(root, f"superloop: failed ({pair} max iterations)", [repo_relative_path(root, paths["run_log"])])
+                if use_git:
+                    commit_paths(root, f"superloop: failed ({pair} max iterations)", [repo_relative_path(root, paths["run_log"])])
                 print(f"[FAILED] Pair `{pair}` reached max iterations without COMPLETE.", file=sys.stderr)
                 sys.exit(1)
 
         append_run_log(paths["run_log"], "All enabled pairs completed")
-        commit_tracked_changes(root, "superloop: successful completion")
+        if use_git:
+            commit_tracked_changes(root, "superloop: successful completion")
         print("\n[SUCCESS] All enabled pairs completed.")
         sys.exit(0)
 
