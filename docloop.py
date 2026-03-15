@@ -263,10 +263,15 @@ def fatal(message: str, exit_code: int = 1):
     print(message, file=sys.stderr)
     sys.exit(exit_code)
 
-def check_dependencies():
+
+def warn(message: str):
+    """Prints a non-fatal warning."""
+    print(f"[!] WARNING: {message}", file=sys.stderr)
+
+def check_dependencies(require_git: bool = True):
     """Fails fast if required CLI tools are missing."""
     missing = []
-    if not shutil.which("git"):
+    if require_git and not shutil.which("git"):
         missing.append("git")
     if not shutil.which("codex"):
         missing.append("codex (install via 'npm i -g @openai/codex')")
@@ -355,7 +360,7 @@ def ensure_git_commit_ready(root: Path):
         fatal(f"[!] FATAL GIT ERROR: Unable to determine a valid git author identity.\n{details}")
 
 def resolve_codex_exec_command(model: str) -> List[str]:
-    """Builds the Codex exec command and verifies full-auto support."""
+    """Builds the Codex exec command and verifies required automation flags."""
     help_result = subprocess.run(
         ["codex", "exec", "--help"],
         capture_output=True,
@@ -369,10 +374,23 @@ def resolve_codex_exec_command(model: str) -> List[str]:
 
     help_text = f"{help_result.stdout}\n{help_result.stderr}"
 
-    if "--full-auto" in help_text:
-        return ["codex", "exec", "--ephemeral", "--full-auto", "--model", model, "-"]
+    missing_flags = [flag for flag in ("--full-auto", "--dangerously-bypass-approvals-and-sandbox") if flag not in help_text]
+    if missing_flags:
+        fatal(
+            "[!] FATAL CODEX ERROR: This Doc-Loop version requires `codex exec` support for: "
+            + ", ".join(missing_flags)
+        )
 
-    fatal("[!] FATAL CODEX ERROR: This Doc-Loop version requires `codex exec --full-auto` support.")
+    return [
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        model,
+        "-",
+    ]
 
 def resolve_output_target(doc_type: str, output_arg: Optional[str]) -> Path:
     """Resolves the target document path from the CLI output flag."""
@@ -468,12 +486,18 @@ def default_context_text(seed_target: bool) -> str:
 
     return DEFAULT_CONTEXT
 
-def init_workspace(workspace: Workspace, target_seed: Optional[str], run_mode: RunMode, update_text: Optional[str]) -> Path:
+def init_workspace(
+    workspace: Workspace,
+    target_seed: Optional[str],
+    run_mode: RunMode,
+    update_text: Optional[str],
+    use_git: bool = True,
+) -> Path:
     """Initializes the minimal filesystem-as-memory architecture."""
     workspace.root.mkdir(parents=True, exist_ok=True)
-    repo_exists = has_git_repo(workspace.root)
+    repo_exists = has_git_repo(workspace.root) if use_git else False
 
-    if repo_exists:
+    if use_git and repo_exists:
         ensure_git_commit_ready(workspace.root)
     
     if not workspace.docloop_dir.exists():
@@ -515,7 +539,7 @@ def init_workspace(workspace: Workspace, target_seed: Optional[str], run_mode: R
             encoding='utf-8'
         )
 
-    if not repo_exists:
+    if use_git and not repo_exists:
         print("[*] Initializing local Git repository...")
         run_git(["init"], cwd=workspace.root)
         # Ensure a local git identity exists so commits don't fail silently
@@ -523,8 +547,9 @@ def init_workspace(workspace: Workspace, target_seed: Optional[str], run_mode: R
         run_git(["config", "user.email", "docloop@localhost"], cwd=workspace.root)
         ensure_git_commit_ready(workspace.root)
     
-    # Only track Doc-Loop specific files to avoid polluting existing repos
-    commit_tracked_changes(workspace, "docloop: baseline")
+    if use_git:
+        # Only track Doc-Loop specific files to avoid polluting existing repos
+        commit_tracked_changes(workspace, "docloop: baseline")
     
     return workspace.target_doc
 
@@ -602,6 +627,7 @@ def main():
     parser.add_argument("--model", type=str, default="gpt-5.4", help="Codex model to use")
     parser.add_argument("--update", action="store_true", help="Update an existing target document using explicit change instructions")
     parser.add_argument("--update-text", type=str, help="Requested document updates to apply when --update is set")
+    parser.add_argument("--no-git", action="store_true", help="Do not initialize git or create git commits/checkpoints")
     input_group = parser.add_mutually_exclusive_group()
     input_group.add_argument("--input-text", type=str, help="Seed the target document from inline text")
     input_group.add_argument("--input-file", type=str, help="Seed the target document from a file")
@@ -619,13 +645,17 @@ def main():
     if args.update_text and not args.update:
         fatal("[!] FATAL: --update-text can only be used together with --update.")
 
-    check_dependencies()
+    use_git = not args.no_git
+    if use_git and not shutil.which("git"):
+        warn("git is not installed; forcing --no-git mode.")
+        use_git = False
+    check_dependencies(require_git=use_git)
     codex_command = resolve_codex_exec_command(args.model)
     target_doc = resolve_output_target(args.type, args.output)
     workspace = build_workspace(target_doc)
     run_mode = select_run_mode(workspace, args.update)
     target_seed = load_input_text(args.input_text, args.input_file)
-    target_doc = init_workspace(workspace, target_seed, run_mode, args.update_text)
+    target_doc = init_workspace(workspace, target_seed, run_mode, args.update_text, use_git=use_git)
     cycle_counter = 0
 
     print("\n[+] Starting Doc-Loop Orchestrator (Codex Native I/O)")
@@ -639,35 +669,38 @@ def main():
             print(f"\n================ Cycle {cycle_number}/{args.max_iterations} ================")
             
             # Baseline filesystem state
-            commit_tracked_changes(workspace, f"docloop: pre-cycle {cycle_number} snapshot")
+            if use_git:
+                commit_tracked_changes(workspace, f"docloop: pre-cycle {cycle_number} snapshot")
 
             writer_stdout = run_codex_phase(codex_command, workspace, run_mode.writer_prompt_file, "writer")
             writer_question, writer_promise = extract_control_tags(writer_stdout)
 
             if writer_question:
-                if tracked_files_changed(workspace):
-                    fatal("[!] Writer emitted <question> after editing tracked files. Refusing to continue with a mixed state.")
-
                 human_answer = ask_human(writer_question)
                 save_human_clarification(workspace, writer_question, human_answer, cycle_number, "writer")
 
-                print("[+] Saving human clarification to git history...")
-                commit_tracked_changes(workspace, f"docloop: human answered writer question in cycle {cycle_number}")
+                if use_git:
+                    print("[+] Saving human clarification to git history...")
+                    commit_tracked_changes(workspace, f"docloop: human answered writer question in cycle {cycle_number}")
                 continue
 
             if writer_promise:
                 fatal(f"[!] Writer emitted <promise>{writer_promise}</promise>. Only the verifier may declare completion.")
 
-            writer_changed = changed_tracked_paths(workspace)
+            writer_changed = changed_tracked_paths(workspace) if use_git else set()
             active_criteria = str(run_mode.criteria_file.relative_to(workspace.root))
             if active_criteria in writer_changed:
                 fatal(f"[!] Writer modified {active_criteria}. Criteria are verifier-owned.")
 
             if writer_changed:
-                print("[+] Writer mutated files. Committing diffs...")
-                commit_tracked_changes(workspace, f"docloop: cycle {cycle_number} writer edits")
+                if use_git:
+                    print("[+] Writer mutated files. Committing diffs...")
+                    commit_tracked_changes(workspace, f"docloop: cycle {cycle_number} writer edits")
             else:
-                print("[-] Writer made no tracked changes.")
+                if use_git:
+                    print("[-] Writer made no tracked changes.")
+                else:
+                    print("[-] Change detection skipped in --no-git mode.")
 
             verifier_stdout = run_codex_phase(
                 codex_command,
@@ -678,18 +711,16 @@ def main():
             verifier_question, verifier_promise = extract_control_tags(verifier_stdout)
 
             if verifier_question:
-                if tracked_files_changed(workspace):
-                    fatal("[!] Verifier emitted <question> after editing tracked files. Refusing to continue with a mixed state.")
-
                 human_answer = ask_human(verifier_question)
                 save_human_clarification(workspace, verifier_question, human_answer, cycle_number, "verifier")
 
-                print("[+] Saving human clarification to git history...")
-                commit_tracked_changes(workspace, f"docloop: human answered verifier question in cycle {cycle_number}")
+                if use_git:
+                    print("[+] Saving human clarification to git history...")
+                    commit_tracked_changes(workspace, f"docloop: human answered verifier question in cycle {cycle_number}")
                 continue
 
-            verifier_changed = changed_tracked_paths(workspace)
-            if workspace.target_doc.name in verifier_changed:
+            verifier_changed = changed_tracked_paths(workspace) if use_git else set()
+            if use_git and workspace.target_doc.name in verifier_changed:
                 fatal("[!] Verifier modified the target document. The verifier may only update Doc-Loop control files.")
 
             if not verifier_promise:
@@ -698,27 +729,30 @@ def main():
                     f.write(f"\n\n### System Warning (Cycle {cycle_number})\n")
                     f.write("No promise tag found, defaulted to <promise>INCOMPLETE</promise>\n")
                 verifier_promise = PROMISE_INCOMPLETE
-                verifier_changed = changed_tracked_paths(workspace)
+                verifier_changed = changed_tracked_paths(workspace) if use_git else set()
 
             if verifier_promise == PROMISE_COMPLETE:
                 if not criteria_all_checked(run_mode.criteria_file):
                     fatal("[!] Verifier emitted <promise>COMPLETE</promise> but the criteria file still has unchecked boxes.")
                 print("\n[SUCCESS] Verifier emitted <promise>COMPLETE</promise>.")
-                commit_tracked_changes(workspace, f"docloop: SUCCESSFUL COMPLETION ({workspace.target_doc.name})")
+                if use_git:
+                    commit_tracked_changes(workspace, f"docloop: SUCCESSFUL COMPLETION ({workspace.target_doc.name})")
                 sys.exit(0)
 
             if verifier_promise == PROMISE_BLOCKED:
                 print("\n[BLOCKED] Verifier emitted <promise>BLOCKED</promise>.", file=sys.stderr)
                 if verifier_changed:
                     print("[+] Verifier wrote blocking feedback. Committing diffs...")
-                    commit_tracked_changes(workspace, f"docloop: BLOCKED ({workspace.target_doc.name})")
+                    if use_git:
+                        commit_tracked_changes(workspace, f"docloop: BLOCKED ({workspace.target_doc.name})")
                 else:
                     print("[!] Verifier blocked without actionable output.", file=sys.stderr)
                 sys.exit(2)
 
             if verifier_promise == PROMISE_INCOMPLETE and verifier_changed:
                 print("[+] Verifier emitted <promise>INCOMPLETE</promise> and wrote feedback. Committing diffs...")
-                commit_tracked_changes(workspace, f"docloop: cycle {cycle_number} verifier feedback")
+                if use_git:
+                    commit_tracked_changes(workspace, f"docloop: cycle {cycle_number} verifier feedback")
             elif not verifier_changed:
                 print("[!] Verifier produced no actionable output. Injecting protocol warning into progress.txt...")
                 with workspace.progress_file.open("a", encoding='utf-8') as f:
@@ -728,10 +762,12 @@ def main():
                         f"Verifier must update `{active_criteria}` and `.docloop/progress.txt`, "
                         "ask a `<question>`, or end with a final promise line.\n"
                     )
-                commit_tracked_changes(workspace, f"docloop: injected verifier protocol warning in cycle {cycle_number}")
+                if use_git:
+                    commit_tracked_changes(workspace, f"docloop: injected verifier protocol warning in cycle {cycle_number}")
             else:
                 print("[+] Verifier wrote feedback. Committing diffs...")
-                commit_tracked_changes(workspace, f"docloop: cycle {cycle_number} verifier feedback")
+                if use_git:
+                    commit_tracked_changes(workspace, f"docloop: cycle {cycle_number} verifier feedback")
 
             cycle_counter += 1
             time.sleep(2) # API Rate-limit cooldown

@@ -30,7 +30,7 @@
 The script expects `codex` to support this execution pattern:
 
 ```bash
-codex exec --ephemeral --full-auto --model MODEL -
+codex exec --ephemeral --full-auto --dangerously-bypass-approvals-and-sandbox --model MODEL -
 ```
 
 ## Usage
@@ -46,6 +46,7 @@ Options:
 - `--type {SAD,PRD}`: Selects the default target document name. Default: `SAD`
 - `--max-iterations N`: Maximum loop count before failing. Default: `15`
 - `--model MODEL`: Codex model passed through to `codex exec`. Default: `gpt-5.4`
+- `--no-git`: Disable git initialization and checkpoint commits for this run (also auto-enabled with a warning when `git` is unavailable)
 - `--update`: Update an existing target document using explicit change instructions
 - `--update-text TEXT`: Requested document updates to apply when `--update` is set
 - `--input-text TEXT`: Seed the output document from inline text
@@ -199,6 +200,7 @@ python3 superloop.py --pairs plan,implement,test
 - `--model MODEL`: Codex model passed to `codex exec` (default `gpt-5.4`)
 - `--intent TEXT`: Optional initial product intent seeded into `.superloop/context.md`
 - `--full-auto-answers`: Automatically answer `<question>` prompts through an extra Codex pass
+- `--no-git`: Disable git initialization and checkpoint commits for this run (also auto-enabled with a warning when `git` is unavailable)
 
 `--pairs` validation notes:
 
