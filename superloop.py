@@ -522,13 +522,20 @@ def parse_pairs(pairs_arg: str, max_iterations: int) -> List[PairConfig]:
 def slugify_task(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     slug = re.sub(r"-+", "-", slug)
-    return slug[:48] or "task"
+    return slug or "task"
 
 
 def derive_intent_task_id(intent: str) -> str:
-    slug = slugify_task(intent)
+    slug = _truncate_slug(slugify_task(intent), 48)
     digest = hashlib.sha1(intent.encode("utf-8")).hexdigest()[:8]
     return f"{slug}-{digest}"
+
+
+def _truncate_slug(slug: str, max_length: int) -> str:
+    if len(slug) <= max_length:
+        return slug or "task"
+    truncated = slug[:max_length].rstrip("-")
+    return truncated or "task"
 
 
 def render_task_prompt(template: str, task_root_rel: str) -> str:

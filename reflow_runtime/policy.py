@@ -7,23 +7,29 @@ from pathlib import Path, PurePosixPath
 from .models import PolicyResult, PolicySpec, WorkspaceSnapshot
 
 
-def snapshot_workspace(workspace: Path) -> WorkspaceSnapshot:
+def snapshot_workspace(workspace: Path, ignored_paths: set[str] | None = None) -> WorkspaceSnapshot:
     root = workspace.resolve()
     entries: dict[str, tuple[str, str]] = {}
     escape_paths: set[str] = set()
+    ignored = {path.strip("/") for path in (ignored_paths or set()) if path}
 
     for current_root, dirnames, filenames in os.walk(workspace, topdown=True, followlinks=False):
         current_path = Path(current_root)
         rel_root = current_path.relative_to(workspace)
-        if rel_root == Path(".reflow"):
+        rel_root_str = "" if rel_root == Path(".") else rel_root.as_posix()
+        if _is_ignored(rel_root_str, ignored):
             dirnames[:] = []
             continue
-        dirnames[:] = [name for name in dirnames if not _is_reflow_owned(rel_root / name)]
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not _is_ignored(name if rel_root == Path(".") else (rel_root / name).as_posix(), ignored)
+        ]
 
         for name in sorted(dirnames + filenames):
             path = current_path / name
-            rel_path = (rel_root / name).as_posix().lstrip("./")
-            if not rel_path or _is_reflow_owned(Path(rel_path)):
+            rel_path = name if rel_root == Path(".") else (rel_root / name).as_posix()
+            if not rel_path or _is_ignored(rel_path, ignored):
                 continue
             try:
                 resolved = path.resolve(strict=False)
@@ -49,7 +55,7 @@ def evaluate_policy(
     )
     violations: list[str] = []
     for escape_path in sorted(before.escape_paths | after.escape_paths):
-        if escape_path in changed_paths or escape_path in after.entries:
+        if escape_path in changed_paths:
             violations.append(f"{escape_path}: resolves outside workspace")
 
     if policy:
@@ -87,9 +93,8 @@ def _matches_any(path: str, patterns: list[str]) -> bool:
     return any(pure.match(pattern) or path == pattern for pattern in patterns)
 
 
-def _is_reflow_owned(path: Path) -> bool:
-    try:
-        first = path.parts[0]
-    except IndexError:
+def _is_ignored(path: str, ignored_paths: set[str]) -> bool:
+    normalized = path.strip("/")
+    if not normalized:
         return False
-    return first == ".reflow"
+    return any(normalized == ignored or normalized.startswith(f"{ignored}/") for ignored in ignored_paths)
