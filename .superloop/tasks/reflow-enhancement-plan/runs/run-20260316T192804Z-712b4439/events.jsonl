@@ -7,3 +7,5 @@
 {"ts": "2026-03-16T19:32:34.071615+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 7, "event_type": "pair_started", "pair": "implement"}
 {"ts": "2026-03-16T19:32:34.071701+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 8, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1}
 {"ts": "2026-03-16T19:40:08.284675+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 9, "event_type": "phase_finished", "pair": "implement", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T19:41:35.840165+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 10, "event_type": "phase_finished", "pair": "implement", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T19:41:35.854032+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 11, "event_type": "pair_completed", "pair": "implement", "cycle": 1, "attempt": 1}
