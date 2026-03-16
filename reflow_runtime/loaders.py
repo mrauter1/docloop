@@ -7,9 +7,11 @@ from .models import (
     AgentStep,
     AgentTransitions,
     ConfigError,
+    ContextEntry,
     DEFAULT_MAX_AUTO_ROUNDS,
     DEFAULT_PROVIDER_TIMEOUT_SEC,
     PolicySpec,
+    ProducesEntry,
     ProviderProfile,
     ReflowConfig,
     RESERVED_TRANSITIONS,
@@ -30,6 +32,7 @@ PROVIDER_FIELDS = {"kind", "command", "model", "timeout_sec", "args", "env"}
 WORKFLOW_TOP_LEVEL_FIELDS = {
     "version",
     "name",
+    "task",
     "entry",
     "steps",
     "default_provider",
@@ -44,6 +47,8 @@ AGENT_STEP_FIELDS = {
     "count_toward_cycles",
     "transitions",
     "policy",
+    "context",
+    "produces",
 }
 SHELL_STEP_FIELDS = {
     "kind",
@@ -144,7 +149,14 @@ def load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> 
     if not isinstance(steps_payload, dict) or not steps_payload:
         raise ConfigError("workflow steps must be a non-empty mapping.")
 
-    entry = _require_non_empty_string(payload.get("entry"), "workflow entry")
+    task_mode = payload.get("task", "optional")
+    task_mode = _require_choice(task_mode, {"required", "optional", "none"}, "workflow task")
+
+    entry_value = payload.get("entry")
+    if entry_value is None:
+        entry = next(iter(steps_payload.keys()))
+    else:
+        entry = _require_non_empty_string(entry_value, "workflow entry")
     if entry.startswith("@"):
         raise ConfigError("workflow entry must not begin with '@'.")
 
@@ -202,6 +214,7 @@ def load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> 
         root=workflow_root,
         entry=entry,
         steps=steps,
+        task_mode=task_mode,
         default_provider=default_provider,
         max_cycles=max_cycles,
         operator_input=WorkflowOperatorInput(
@@ -211,11 +224,14 @@ def load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> 
     )
 
 
-def load_instruction_body(workflow: Workflow, relative_path: str) -> str:
-    target = workflow.root / relative_path
-    if target.is_dir():
-        target = target / "SKILL.md"
-    return target.read_text(encoding="utf-8")
+def load_instruction_body(workflow: Workflow, relative_paths: list[str]) -> str:
+    bodies: list[str] = []
+    for relative_path in relative_paths:
+        target = workflow.root / relative_path
+        if target.is_dir():
+            target = target / "SKILL.md"
+        bodies.append(target.read_text(encoding="utf-8").rstrip())
+    return "\n\n".join(bodies)
 
 
 def resolve_provider_for_step(config: ReflowConfig, workflow: Workflow, step: AgentStep) -> ProviderProfile:
@@ -249,11 +265,28 @@ def _parse_step(
     kind = _require_choice(payload.get("kind"), {"agent", "shell"}, f"step {step_name!r} kind")
     if kind == "agent":
         _validate_allowed_fields(payload, AGENT_STEP_FIELDS, f"agent step {step_name!r}")
-        instructions = _validate_workflow_relative_instruction(
-            workflow_root,
-            payload.get("instructions"),
-            f"agent step {step_name!r} instructions",
-        )
+        raw_instructions = payload.get("instructions")
+        if isinstance(raw_instructions, list):
+            if not raw_instructions:
+                raise ConfigError(f"agent step {step_name!r} instructions list must not be empty.")
+            instructions = [
+                _validate_workflow_relative_instruction(
+                    workflow_root,
+                    entry,
+                    f"agent step {step_name!r} instructions[{index}]",
+                )
+                for index, entry in enumerate(raw_instructions)
+            ]
+        elif isinstance(raw_instructions, str):
+            instructions = [
+                _validate_workflow_relative_instruction(
+                    workflow_root,
+                    raw_instructions,
+                    f"agent step {step_name!r} instructions",
+                )
+            ]
+        else:
+            raise ConfigError(f"agent step {step_name!r} instructions must be a string or list of strings.")
         max_loops = _require_positive_int(payload.get("max_loops"), f"agent step {step_name!r} max_loops")
         count_toward_cycles = _require_bool_default(
             payload.get("count_toward_cycles", False),
@@ -268,6 +301,18 @@ def _parse_step(
             raise ConfigError(f"agent step {step_name!r} cannot resolve a provider.")
         transitions = _parse_transitions(payload.get("transitions"), declared_steps, step_name)
         policy = _parse_policy(workspace, payload.get("policy"), f"agent step {step_name!r}")
+        context = _parse_declared_entries(
+            workflow_root,
+            payload.get("context", []),
+            f"agent step {step_name!r} context",
+            ContextEntry,
+        )
+        produces = _parse_declared_entries(
+            workflow_root,
+            payload.get("produces", []),
+            f"agent step {step_name!r} produces",
+            ProducesEntry,
+        )
         return AgentStep(
             name=step_name,
             instructions=instructions,
@@ -276,6 +321,8 @@ def _parse_step(
             provider=provider_name,
             count_toward_cycles=count_toward_cycles,
             policy=policy,
+            context=context,
+            produces=produces,
         )
 
     _validate_allowed_fields(payload, SHELL_STEP_FIELDS, f"shell step {step_name!r}")
@@ -317,7 +364,8 @@ def _parse_transitions(payload: object, declared_steps: set[str], label: str) ->
         default_target = _validate_transition_target(payload.get("default"), declared_steps, f"{label} transitions default")
         return AgentTransitions(default_target=default_target, tag=None, default_decision=None, mapping={})
 
-    tag = _require_non_empty_string(payload.get("tag"), f"agent step {label!r} transitions.tag")
+    tag_value = payload.get("tag", "route" if "map" in payload else None)
+    tag = _require_non_empty_string(tag_value, f"agent step {label!r} transitions.tag")
     default_decision = _require_non_empty_string(
         payload.get("default"),
         f"agent step {label!r} transitions.default",
@@ -333,6 +381,20 @@ def _parse_transitions(payload: object, declared_steps: set[str], label: str) ->
     if default_decision not in mapping:
         raise ConfigError(f"agent step {label!r} transitions.default must exist in transitions.map.")
     return AgentTransitions(default_target=None, tag=tag, default_decision=default_decision, mapping=mapping)
+
+
+def _parse_declared_entries(workflow_root: Path, payload: object, label: str, entry_type):
+    if not isinstance(payload, list):
+        raise ConfigError(f"{label} must be a list when provided.")
+    entries = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ConfigError(f"{label}[{index}] must be a mapping.")
+        _validate_allowed_fields(item, {"path", "as"}, f"{label}[{index}]")
+        path = _validate_workflow_relative_declared_path(workflow_root, item.get("path"), f"{label}[{index}].path")
+        as_description = _require_non_empty_string(item.get("as"), f"{label}[{index}].as")
+        entries.append(entry_type(path=path, as_description=as_description))
+    return entries
 
 
 def _parse_policy(workspace: Path, payload: object, label: str) -> PolicySpec | None:
@@ -408,6 +470,13 @@ def _validate_workflow_relative_file(workflow_root: Path, value: object, label: 
     _ensure_path_inside_root(workflow_root, target, label)
     if not target.is_file():
         raise ConfigError(f"{label} must reference an existing file.")
+    return relative
+
+
+def _validate_workflow_relative_declared_path(workflow_root: Path, value: object, label: str) -> str:
+    relative = _normalize_repo_pattern(value, label)
+    target = workflow_root / relative
+    _ensure_path_inside_root(workflow_root, target, label)
     return relative
 
 

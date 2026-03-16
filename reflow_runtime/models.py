@@ -99,14 +99,28 @@ class AgentTransitions:
 
 
 @dataclass(frozen=True)
+class ContextEntry:
+    path: str
+    as_description: str
+
+
+@dataclass(frozen=True)
+class ProducesEntry:
+    path: str
+    as_description: str
+
+
+@dataclass(frozen=True)
 class AgentStep:
     name: str
-    instructions: str
+    instructions: list[str]
     max_loops: int
     transitions: AgentTransitions
     provider: str | None = None
     count_toward_cycles: bool = False
     policy: PolicySpec | None = None
+    context: list[ContextEntry] = field(default_factory=list)
+    produces: list[ProducesEntry] = field(default_factory=list)
     kind: Literal["agent"] = "agent"
 
 
@@ -137,6 +151,7 @@ class Workflow:
     root: Path
     entry: str
     steps: dict[str, Step]
+    task_mode: Literal["required", "optional", "none"]
     default_provider: str | None
     max_cycles: int | None
     operator_input: WorkflowOperatorInput
@@ -181,6 +196,7 @@ class PendingInput:
 class RunState:
     run_id: str
     workflow: str
+    task: str | None
     status: str
     current_step: str
     step_loops: dict[str, int]
@@ -195,6 +211,7 @@ class RunState:
         payload: dict[str, object] = {
             "run_id": self.run_id,
             "workflow": self.workflow,
+            "task": self.task,
             "status": self.status,
             "current_step": self.current_step,
             "step_loops": dict(self.step_loops),
@@ -217,6 +234,7 @@ class RunState:
         return cls(
             run_id=str(payload["run_id"]),
             workflow=str(payload["workflow"]),
+            task=str(payload["task"]) if payload.get("task") is not None else None,
             status=str(payload["status"]),
             current_step=str(payload["current_step"]),
             step_loops={str(k): int(v) for k, v in dict(payload["step_loops"]).items()},

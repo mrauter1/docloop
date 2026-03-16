@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .models import AgentOutcome, AgentTransitions, PolicySpec, StepFailedError, Workflow
+from .loaders import load_instruction_body
+from .models import AgentOutcome, AgentTransitions, StepFailedError, Workflow
 
 QUESTIONS_BLOCK_RE = re.compile(r"(?s)\A(.*?)(<questions>(.*?)</questions>)\s*\Z", re.IGNORECASE)
 QUESTION_RE = re.compile(r"<question>(.*?)</question>", re.IGNORECASE | re.DOTALL)
@@ -20,11 +21,10 @@ def render_agent_request(
     step,
     loop: int,
     warning: str | None,
+    workspace: Path,
+    context_present: dict[str, bool] | None = None,
 ) -> str:
-    instruction_body = (workflow.root / step.instructions)
-    if instruction_body.is_dir():
-        instruction_body = instruction_body / "SKILL.md"
-    body = instruction_body.read_text(encoding="utf-8").rstrip()
+    body = load_instruction_body(workflow, step.instructions)
 
     policy_lines: list[str] = []
     if step.policy:
@@ -36,16 +36,30 @@ def render_agent_request(
             policy_lines.append(f"- required files: {', '.join(step.policy.required_files)}")
 
     transition_lines = _render_transition_footer(step.transitions)
+    context_lines = _render_declared_context_lines(workflow, step, workspace, context_present or {})
+    produces_lines = [f"- expected output: {entry.path} as {entry.as_description}" for entry in step.produces]
 
     footer_parts = [
         "## Reflow Runtime",
-        f"- workflow: {workflow.name}",
-        f"- step: {step.name}",
-        f"- loop: {loop}",
-        f"- operator_inputs: .reflow/runs/{run.run_id}/operator_inputs.md",
-        "- If you need operator input, emit a final <questions> block with one or more <question> entries.",
-        transition_lines,
     ]
+    if run.task is not None:
+        footer_parts.append(f"- task: {run.task}")
+    footer_parts.extend(
+        [
+            f"- workflow: {workflow.name}",
+            f"- step: {step.name}",
+            f"- loop: {loop}",
+        ]
+    )
+    footer_parts.extend(context_lines)
+    footer_parts.extend(produces_lines)
+    footer_parts.extend(
+        [
+            f"- operator_inputs: .reflow/runs/{run.run_id}/operator_inputs.md",
+            "- If you need operator input, emit a final <questions> block with one or more <question> entries.",
+            transition_lines,
+        ]
+    )
     footer_parts.extend(policy_lines)
     if warning:
         footer_parts.append(f"- warning: {warning}")
@@ -109,6 +123,17 @@ def parse_full_auto_answers(stdout_text: str, expected_count: int) -> list[str]:
 
 def malformed_control_warning() -> str:
     return "Previous iteration emitted malformed control output. Emit either a valid final <questions> block or a valid transition outcome."
+
+
+def _render_declared_context_lines(workflow: Workflow, step, workspace: Path, context_present: dict[str, bool]) -> list[str]:
+    lines: list[str] = []
+    for entry in step.context:
+        present = context_present.get(entry.path)
+        if present is None:
+            present = (workflow.root / entry.path).exists() or (workspace / entry.path).exists()
+        suffix = entry.path if present else f"{entry.path} (not present)"
+        lines.append(f"- context: {suffix} as {entry.as_description}")
+    return lines
 
 
 def _render_transition_footer(transitions: AgentTransitions) -> str:
