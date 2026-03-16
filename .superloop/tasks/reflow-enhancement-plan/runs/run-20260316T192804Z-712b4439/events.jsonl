@@ -11,3 +11,4 @@
 {"ts": "2026-03-16T19:41:35.854032+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 11, "event_type": "pair_completed", "pair": "implement", "cycle": 1, "attempt": 1}
 {"ts": "2026-03-16T19:41:35.869408+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 12, "event_type": "pair_started", "pair": "test"}
 {"ts": "2026-03-16T19:41:35.869474+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 13, "event_type": "cycle_started", "pair": "test", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T19:43:20.628660+00:00", "run_id": "run-20260316T192804Z-712b4439", "seq": 14, "event_type": "phase_finished", "pair": "test", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}

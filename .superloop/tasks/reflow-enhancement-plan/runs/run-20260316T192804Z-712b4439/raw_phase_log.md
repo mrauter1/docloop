@@ -45,3 +45,15 @@ Verification: `pytest -q tests/test_superloop_observability.py` and `pytest -q t
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260316T192804Z-712b4439 | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1
+---
+Added focused regression coverage for the active behavior changes.
+
+In [tests/test_reflow_runtime.py](/home/marcelo/code/docloop/tests/test_reflow_runtime.py), I added direct policy tests for `ignored_paths` snapshot filtering and for the failure path where a changed workspace entry becomes a symlink escaping the workspace. In [tests/test_superloop_observability.py](/home/marcelo/code/docloop/tests/test_superloop_observability.py), I added an edge-case test proving intent-derived task IDs strip a trailing hyphen after truncation before the hash suffix is appended.
+
+I also updated the task artifacts: [test_strategy.md](/home/marcelo/code/docloop/.superloop/tasks/reflow-enhancement-plan/test/test_strategy.md) now contains an explicit behavior-to-test coverage map plus flake controls, and [feedback.md](/home/marcelo/code/docloop/.superloop/tasks/reflow-enhancement-plan/test/feedback.md) has a concise summary of the additions.
+
+Verification: `pytest -q tests/test_reflow_runtime.py -k "snapshot_workspace or evaluate_policy"` and `pytest -q tests/test_superloop_observability.py -k "task_id or derive_intent_task_id or resume_accepts_long_explicit_task_id"` both passed.

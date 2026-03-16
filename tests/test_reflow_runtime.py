@@ -269,6 +269,39 @@ def test_evaluate_policy_ignores_unchanged_escape_symlink(tmp_path: Path):
     assert result.violations == []
 
 
+def test_snapshot_workspace_ignores_configured_paths_and_nested_entries(tmp_path: Path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "kept.txt").write_text("keep", encoding="utf-8")
+    ignored_dir = workspace / "ignored"
+    ignored_dir.mkdir()
+    (ignored_dir / "nested.txt").write_text("skip", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("seed", encoding="utf-8")
+    (ignored_dir / "escape").symlink_to(outside)
+
+    snapshot = snapshot_workspace(workspace, ignored_paths={"ignored"})
+
+    assert snapshot.entries == {"kept.txt": ("file", snapshot.entries["kept.txt"][1])}
+    assert snapshot.escape_paths == set()
+
+
+def test_evaluate_policy_flags_changed_escape_symlink(tmp_path: Path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    escape_target = tmp_path / "outside.txt"
+    escape_target.write_text("seed", encoding="utf-8")
+    (workspace / "escape").write_text("before", encoding="utf-8")
+
+    before = snapshot_workspace(workspace)
+    (workspace / "escape").unlink()
+    (workspace / "escape").symlink_to(escape_target)
+    after = snapshot_workspace(workspace)
+
+    result = evaluate_policy(before, after, None, workspace)
+    assert result.violations == ["escape: resolves outside workspace"]
+
+
 def test_run_status_and_list_cover_required_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     workspace = create_workspace(tmp_path)
     monkeypatch.setenv("PATH", f"{workspace / 'bin'}:{os.environ['PATH']}")

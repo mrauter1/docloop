@@ -257,11 +257,96 @@ def test_task_id_for_run_finds_task_containing_run(tmp_path: Path):
     assert task_id_for_run(tasks_dir, "run-2") == "task-y"
 
 
-def test_intent_derived_task_id_is_collision_resistant_for_similar_prefixes():
+def test_resolve_task_id_preserves_long_explicit_task_ids():
     intent_a = "Implement refined reflow v1.2 with strict verification and artifact scoping alpha"
     intent_b = "Implement refined reflow v1.2 with strict verification and artifact scoping beta"
-    assert superloop.slugify_task(intent_a) == superloop.slugify_task(intent_b)
-    assert derive_intent_task_id(intent_a) != derive_intent_task_id(intent_b)
+    assert resolve_task_id(intent_a, None) == superloop.slugify_task(intent_a)
+    assert resolve_task_id(intent_b, None) == superloop.slugify_task(intent_b)
+    assert resolve_task_id(intent_a, None) != resolve_task_id(intent_b, None)
+
+
+def test_derive_intent_task_id_truncates_long_slug_but_keeps_hash_uniqueness():
+    intent_a = "x " * 300
+    intent_b = "x " * 299 + "y"
+
+    task_id_a = derive_intent_task_id(intent_a)
+    task_id_b = derive_intent_task_id(intent_b)
+
+    assert len(task_id_a.split("-")[-1]) == 8
+    assert len(task_id_a) <= 57
+    assert task_id_a != task_id_b
+
+
+def test_derive_intent_task_id_strips_trailing_hyphen_from_truncated_slug():
+    intent = ("abc-" * 20) + "tail"
+
+    task_id = derive_intent_task_id(intent)
+    slug, digest = task_id.rsplit("-", 1)
+
+    assert not slug.endswith("-")
+    assert len(digest) == 8
+
+
+def test_ensure_workspace_accepts_long_intent_derived_task_ids(tmp_path: Path):
+    intent = "x " * 300
+
+    task_id = derive_intent_task_id(intent)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id=task_id,
+        product_intent=intent,
+        intent_mode="preserve",
+    )
+
+    assert paths["task_dir"].name == task_id
+    assert paths["task_dir"].is_dir()
+    assert (paths["task_dir"] / "task.json").exists()
+
+
+def test_resume_accepts_long_explicit_task_id(tmp_path: Path, monkeypatch):
+    task_id = "implement-refined-reflow-v1-2-sad-md-as-function-d391842d"
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id=task_id,
+        product_intent=None,
+        intent_mode="preserve",
+    )
+    create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12")
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: ["codex", "exec"])
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            task_id,
+            "--resume",
+            "--run-id",
+            "run-20260316T120000Z-abcdef12",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
 
 
 def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: Path):
