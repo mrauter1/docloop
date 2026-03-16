@@ -8,7 +8,6 @@ Requires: 'git' and 'codex' CLI installed and available in your PATH.
 """
 
 import argparse
-import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +15,16 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Set
+
+from loop_control import (
+    LoopControl,
+    LoopControlParseError,
+    PROMISE_BLOCKED,
+    PROMISE_COMPLETE,
+    PROMISE_INCOMPLETE,
+    criteria_all_checked,
+    parse_loop_control,
+)
 
 # --- Default Templates ---
 DEFAULT_PROMPT = """# Doc-Loop Writer Instructions
@@ -43,9 +52,12 @@ You are the writer agent. Refine the target document until the verifier can pass
 12. Append a concise writer log entry to `.docloop/progress.txt`. Do not overwrite it.
 
 ## Ask A Question
-If you would need to invent product behavior, external interfaces, data contracts, acceptance criteria, or operational rules to continue safely, do not edit any files. Output:
-<question>Ask your clarifying question here</question>
+If you would need to invent product behavior, external interfaces, data contracts, acceptance criteria, or operational rules to continue safely, do not edit any files. Output exactly one canonical loop-control block as the last non-empty logical block:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"question","question":"Ask your clarifying question here"}
+</loop-control>
 
+Legacy `<question>...</question>` output remains supported for compatibility, but the canonical loop-control block is the default contract.
 Do not output any `<promise>...</promise>` tag. The verifier decides completion.
 """
 
@@ -73,18 +85,28 @@ You are the verifier agent. Evaluate whether the target document is implementati
 11. Flag detail for removal only when it prescribes one possible internal algorithm, code structure, or local sequencing that other conforming implementations could vary without changing the contract.
 
 ## Ask A Question
-If reliable verification is blocked because the human has not provided necessary product intent or constraints, do not edit any files. Output:
-<question>Ask your clarifying question here</question>
+If reliable verification is blocked because the human has not provided necessary product intent or constraints, do not edit any files. Output exactly one canonical loop-control block as the last non-empty logical block:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"question","question":"Ask your clarifying question here"}
+</loop-control>
 
 ## Completion
-If every box in `.docloop/criteria.md` is checked, no further writer edits are needed, and the document is implementation-ready, end your response with this exact last non-empty line:
-<promise>COMPLETE</promise>
+If every box in `.docloop/criteria.md` is checked, no further writer edits are needed, and the document is implementation-ready, end your response with exactly one canonical loop-control block as the last non-empty logical block:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
 
-If the document is not complete but the writer can continue productively, update `.docloop/criteria.md` and `.docloop/progress.txt`, then end your response with this exact last non-empty line:
-<promise>INCOMPLETE</promise>
+If the document is not complete but the writer can continue productively, update `.docloop/criteria.md` and `.docloop/progress.txt`, then end your response with:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
 
-If you cannot proceed safely because the context is contradictory, missing, or too ambiguous for another writer pass to help, prefer asking a `<question>` first. If no single clarifying question can safely unblock the work, update `.docloop/criteria.md` and `.docloop/progress.txt`, then end your response with this exact last non-empty line:
-<promise>BLOCKED</promise>
+If you cannot proceed safely because the context is contradictory, missing, or too ambiguous for another writer pass to help, prefer asking a question first. If no single clarifying question can safely unblock the work, update `.docloop/criteria.md` and `.docloop/progress.txt`, then end your response with:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"BLOCKED"}
+</loop-control>
+
+Legacy `<question>...</question>` and final-line `<promise>...</promise>` outputs remain supported for compatibility, but canonical loop-control output is the default contract.
 """
 
 DEFAULT_UPDATE_PROMPT = """# Doc-Loop Update Writer Instructions
@@ -114,13 +136,12 @@ You are the update writer agent. Apply the requested changes to the target docum
 12. Append a concise writer log entry to `.docloop/progress.txt`. Do not overwrite it.
 
 ## Ask A Question
-If the requested changes are breaking, ambiguous, likely to introduce regression bugs, or can clearly be misunderstood, and you cannot resolve them safely from the update request, context, or baseline, do not edit any files. Output:
-<question>
-Question: Ask your clarifying question here
-Best supposition: State your best current assumption right beside this question
-</question>
+If the requested changes are breaking, ambiguous, likely to introduce regression bugs, or can clearly be misunderstood, and you cannot resolve them safely from the update request, context, or baseline, do not edit any files. Output exactly one canonical loop-control block as the last non-empty logical block:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"question","question":"Ask your clarifying question here","best_supposition":"State your best current assumption right beside this question"}
+</loop-control>
 
-Every question must include its best supposition immediately beside it.
+Every question must include its best supposition immediately beside it. Legacy `<question>...</question>` output remains supported for compatibility, but the canonical loop-control block is the default contract.
 Do not output any `<promise>...</promise>` tag. The verifier decides completion.
 """
 
@@ -151,23 +172,30 @@ You are the update verifier agent. Verify that the requested updates were applie
 12. Flag update-added detail for removal only when it prescribes one possible internal algorithm, code structure, or local sequencing that other conforming implementations could vary without changing the contract.
 
 ## Ask A Question
-If reliable verification is blocked because the requested change is breaking, ambiguous, likely to introduce regressions, or can clearly be misunderstood, do not edit any files. Output:
-<question>
-Question: Ask your clarifying question here
-Best supposition: State your best current assumption right beside this question
-</question>
+If reliable verification is blocked because the requested change is breaking, ambiguous, likely to introduce regressions, or can clearly be misunderstood, do not edit any files. Output exactly one canonical loop-control block as the last non-empty logical block:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"question","question":"Ask your clarifying question here","best_supposition":"State your best current assumption right beside this question"}
+</loop-control>
 
 Every question must include its best supposition immediately beside it.
 
 ## Completion
-If every box in `.docloop/update_criteria.md` is checked, the requested changes are applied, no unintended regressions remain, and no further edits are needed, end your response with this exact last non-empty line:
-<promise>COMPLETE</promise>
+If every box in `.docloop/update_criteria.md` is checked, the requested changes are applied, no unintended regressions remain, and no further edits are needed, end your response with exactly one canonical loop-control block as the last non-empty logical block:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
 
-If the update is not complete but the writer can continue productively, update `.docloop/update_criteria.md` and `.docloop/progress.txt`, then end your response with this exact last non-empty line:
-<promise>INCOMPLETE</promise>
+If the update is not complete but the writer can continue productively, update `.docloop/update_criteria.md` and `.docloop/progress.txt`, then end your response with:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
 
-If you cannot proceed safely because the request or context is contradictory, missing, or too ambiguous for another writer pass to help, prefer asking a `<question>` first. If no single clarifying question can safely unblock the work, update `.docloop/update_criteria.md` and `.docloop/progress.txt`, then end your response with this exact last non-empty line:
-<promise>BLOCKED</promise>
+If you cannot proceed safely because the request or context is contradictory, missing, or too ambiguous for another writer pass to help, prefer asking a question first. If no single clarifying question can safely unblock the work, update `.docloop/update_criteria.md` and `.docloop/progress.txt`, then end your response with:
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"BLOCKED"}
+</loop-control>
+
+Legacy `<question>...</question>` and final-line `<promise>...</promise>` outputs remain supported for compatibility, but canonical loop-control output is the default contract.
 """
 
 DEFAULT_CRITERIA = """# Document Verification Criteria
@@ -248,15 +276,6 @@ class RunMode:
     writer_prompt_file: Path
     verifier_prompt_file: Path
     criteria_file: Path
-
-
-PROMISE_COMPLETE = "COMPLETE"
-PROMISE_INCOMPLETE = "INCOMPLETE"
-PROMISE_BLOCKED = "BLOCKED"
-PROMISE_LINE_RE = re.compile(
-    r"^\s*<promise>(COMPLETE|INCOMPLETE|BLOCKED)</promise>\s*$",
-    re.IGNORECASE,
-)
 
 def fatal(message: str, exit_code: int = 1):
     """Prints a fatal error and exits immediately."""
@@ -593,25 +612,67 @@ def run_codex_phase(codex_command: List[str], workspace: Workspace, prompt_path:
 
     return stdout
 
-def last_non_empty_line(text: str) -> str:
-    """Returns the last non-empty line from a text payload, or an empty string."""
-    for line in reversed(text.splitlines()):
-        if line.strip():
-            return line.strip()
-    return ""
+@dataclass(frozen=True)
+class PhaseControlDecision:
+    action: str
+    warning: Optional[str] = None
+    fatal_message: Optional[str] = None
 
-def extract_control_tags(stdout: str) -> tuple[Optional[str], Optional[str]]:
-    """Extracts supported control tags from a Codex stdout payload."""
-    question_match = re.search(r"<question>(.*?)</question>", stdout, re.DOTALL | re.IGNORECASE)
-    promise_match = PROMISE_LINE_RE.fullmatch(last_non_empty_line(stdout))
-    question_text = question_match.group(1).strip() if question_match else None
-    promise = promise_match.group(1).upper() if promise_match else None
-    return question_text, promise
 
-def criteria_all_checked(criteria_file: Path) -> bool:
-    """Returns True when the verifier-owned checklist has no unchecked boxes."""
-    criteria_text = criteria_file.read_text(encoding='utf-8')
-    return re.search(r"^- \[ \]", criteria_text, re.MULTILINE) is None
+def format_question(question: LoopControl) -> Optional[str]:
+    if not question.question:
+        return None
+    if question.question.best_supposition:
+        return (
+            f"{question.question.text}\n"
+            f"Best supposition: {question.question.best_supposition}"
+        )
+    return question.question.text
+
+
+def parse_phase_control(stdout: str, phase_name: str) -> LoopControl:
+    try:
+        return parse_loop_control(stdout)
+    except LoopControlParseError as exc:
+        fatal(
+            f"[!] {phase_name.capitalize()} emitted malformed or conflicting loop-control output: {exc}"
+        )
+
+
+def decide_writer_control(control: LoopControl) -> PhaseControlDecision:
+    if control.question:
+        return PhaseControlDecision(action="question")
+    if control.promise:
+        return PhaseControlDecision(
+            action="fatal",
+            fatal_message=(
+                f"[!] Writer emitted <promise>{control.promise}</promise>. "
+                "Only the verifier may declare completion."
+            ),
+        )
+    return PhaseControlDecision(action="continue")
+
+
+def decide_verifier_control(control: LoopControl, criteria_checked: bool) -> PhaseControlDecision:
+    if control.question:
+        return PhaseControlDecision(action="question")
+    if not control.promise:
+        return PhaseControlDecision(
+            action="incomplete",
+            warning="No promise tag found, defaulted to <promise>INCOMPLETE</promise>",
+        )
+    if control.promise == PROMISE_COMPLETE and not criteria_checked:
+        return PhaseControlDecision(
+            action="fatal",
+            fatal_message=(
+                "[!] Verifier emitted <promise>COMPLETE</promise> but the criteria file still has unchecked boxes."
+            ),
+        )
+    if control.promise == PROMISE_COMPLETE:
+        return PhaseControlDecision(action="complete")
+    if control.promise == PROMISE_BLOCKED:
+        return PhaseControlDecision(action="blocked")
+    return PhaseControlDecision(action="incomplete")
 
 def save_human_clarification(workspace: Workspace, question_text: str, human_answer: str, cycle_number: int, phase_name: str):
     """Appends a human clarification to context.md."""
@@ -673,9 +734,11 @@ def main():
                 commit_tracked_changes(workspace, f"docloop: pre-cycle {cycle_number} snapshot")
 
             writer_stdout = run_codex_phase(codex_command, workspace, run_mode.writer_prompt_file, "writer")
-            writer_question, writer_promise = extract_control_tags(writer_stdout)
+            writer_control = parse_phase_control(writer_stdout, "writer")
+            writer_decision = decide_writer_control(writer_control)
 
-            if writer_question:
+            if writer_decision.action == "question":
+                writer_question = format_question(writer_control)
                 human_answer = ask_human(writer_question)
                 save_human_clarification(workspace, writer_question, human_answer, cycle_number, "writer")
 
@@ -684,8 +747,8 @@ def main():
                     commit_tracked_changes(workspace, f"docloop: human answered writer question in cycle {cycle_number}")
                 continue
 
-            if writer_promise:
-                fatal(f"[!] Writer emitted <promise>{writer_promise}</promise>. Only the verifier may declare completion.")
+            if writer_decision.action == "fatal":
+                fatal(writer_decision.fatal_message)
 
             writer_changed = changed_tracked_paths(workspace) if use_git else set()
             active_criteria = str(run_mode.criteria_file.relative_to(workspace.root))
@@ -708,9 +771,14 @@ def main():
                 run_mode.verifier_prompt_file,
                 "verifier"
             )
-            verifier_question, verifier_promise = extract_control_tags(verifier_stdout)
+            verifier_control = parse_phase_control(verifier_stdout, "verifier")
+            verifier_decision = decide_verifier_control(
+                verifier_control,
+                criteria_checked=criteria_all_checked(run_mode.criteria_file),
+            )
 
-            if verifier_question:
+            if verifier_decision.action == "question":
+                verifier_question = format_question(verifier_control)
                 human_answer = ask_human(verifier_question)
                 save_human_clarification(workspace, verifier_question, human_answer, cycle_number, "verifier")
 
@@ -723,23 +791,23 @@ def main():
             if use_git and workspace.target_doc.name in verifier_changed:
                 fatal("[!] Verifier modified the target document. The verifier may only update Doc-Loop control files.")
 
-            if not verifier_promise:
+            if verifier_decision.warning:
                 print("[!] No verifier promise tag found. Defaulting to <promise>INCOMPLETE</promise>.")
                 with workspace.progress_file.open("a", encoding='utf-8') as f:
                     f.write(f"\n\n### System Warning (Cycle {cycle_number})\n")
-                    f.write("No promise tag found, defaulted to <promise>INCOMPLETE</promise>\n")
-                verifier_promise = PROMISE_INCOMPLETE
+                    f.write(f"{verifier_decision.warning}\n")
                 verifier_changed = changed_tracked_paths(workspace) if use_git else set()
 
-            if verifier_promise == PROMISE_COMPLETE:
-                if not criteria_all_checked(run_mode.criteria_file):
-                    fatal("[!] Verifier emitted <promise>COMPLETE</promise> but the criteria file still has unchecked boxes.")
+            if verifier_decision.action == "fatal":
+                fatal(verifier_decision.fatal_message)
+
+            if verifier_decision.action == "complete":
                 print("\n[SUCCESS] Verifier emitted <promise>COMPLETE</promise>.")
                 if use_git:
                     commit_tracked_changes(workspace, f"docloop: SUCCESSFUL COMPLETION ({workspace.target_doc.name})")
                 sys.exit(0)
 
-            if verifier_promise == PROMISE_BLOCKED:
+            if verifier_decision.action == "blocked":
                 print("\n[BLOCKED] Verifier emitted <promise>BLOCKED</promise>.", file=sys.stderr)
                 if verifier_changed:
                     print("[+] Verifier wrote blocking feedback. Committing diffs...")
@@ -749,7 +817,7 @@ def main():
                     print("[!] Verifier blocked without actionable output.", file=sys.stderr)
                 sys.exit(2)
 
-            if verifier_promise == PROMISE_INCOMPLETE and verifier_changed:
+            if verifier_decision.action == "incomplete" and verifier_changed:
                 print("[+] Verifier emitted <promise>INCOMPLETE</promise> and wrote feedback. Committing diffs...")
                 if use_git:
                     commit_tracked_changes(workspace, f"docloop: cycle {cycle_number} verifier feedback")

@@ -4,6 +4,8 @@
 
 This document is the normative architecture for Reflow v1.2.
 
+Within this repository, `refined_reflow_v1.2/SAD.md` is the canonical v1.2 source. Any duplicate file MUST either point to this document explicitly or be an exact mirror of it.
+
 It defines the minimum architecture required to implement Reflow as a thin, repeatable workflow loop runner around provider CLIs such as Codex CLI and Claude Code. It covers repository layout, workflow and config contracts, provider invocation, storage, human-in-the-loop behavior, policy enforcement, deterministic shell steps, resume, terminal behavior, testing, and implementation order.
 
 Unless explicitly marked as informative or future work, every statement in this document is normative.
@@ -722,6 +724,7 @@ When present, `pending_input` MUST be a JSON object with:
 Rules:
 
 * `questions` is an ordered list of non-empty strings.
+* A newly created `pending_input` record MUST initialize `auto_round` to `0`.
 * `auto_round` is the number of full-auto answer passes already attempted for the current pending input request.
 * `pending_input` is control-plane state only. Resolved answers belong in `operator_inputs.md`, not in `run.json`.
 
@@ -926,6 +929,8 @@ For tagged transitions, the footer MUST include the exact tag name and valid dec
 
 For every `agent` iteration, Reflow MUST inspect `final.txt` for a valid final `<questions>` block before accepting a transition.
 
+When Reflow creates a new `pending_input` object for a detected request, it MUST preserve the emitted questions in order and initialize `auto_round` to `0`.
+
 ### 14.2 Inline interactive mode
 
 If Reflow is running interactively, stdin is available, and `--full-auto` is not set:
@@ -942,8 +947,6 @@ If inline answers are not collected immediately:
 2. Reflow MUST update `active.json` if the same controller process is still waiting.
 3. If the controller exits while awaiting input, it MUST remove `active.json`.
 4. A later `reflow reply <run_id>` MUST provide the answers, append them to `operator_inputs.md`, clear `pending_input`, switch the run back to `running`, and start a fresh iteration of the same step.
-
-### 14.4 Full-auto mode
 
 ### 14.4 Full-auto answer contract
 
@@ -1105,9 +1108,11 @@ On resume, Reflow:
 Rules:
 
 * `reply` MUST fail if `pending_input` is absent.
+* `reply` MUST reacquire the workspace lock before resolving input.
+* `reply` MUST append `reply_started` after taking controller ownership and before collecting or auto-generating answers.
 * In normal mode, `reply` SHOULD prompt the operator for answers inline.
 * In `--full-auto`, `reply` MUST use the full-auto answer path.
-* After resolving input, `reply` MUST append to `operator_inputs.md`, clear `pending_input`, set status back to `running`, append `reply_started`, and start a fresh iteration of the same step.
+* After resolving input, `reply` MUST append to `operator_inputs.md`, clear `pending_input`, set status back to `running`, and start a fresh iteration of the same step.
 
 ### 17.4 Stop semantics
 

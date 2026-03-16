@@ -1,0 +1,20 @@
+{"ts": "2026-03-16T01:02:27.399537+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 1, "event_type": "run_started", "workspace": "/workspace/CodexTest/docloop", "pairs": ["plan", "implement", "test"], "max_iterations": 30, "use_git": false, "task_id": "refined-reflow-v1-2", "task_root": ".superloop/tasks/refined-reflow-v1-2"}
+{"ts": "2026-03-16T01:02:27.399737+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 2, "event_type": "pair_started", "pair": "plan"}
+{"ts": "2026-03-16T01:02:27.399808+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T01:05:56.287806+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 4, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:08:04.313029+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 5, "event_type": "phase_finished", "pair": "plan", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:08:04.313484+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 6, "event_type": "pair_completed", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T01:08:04.313621+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 7, "event_type": "pair_started", "pair": "implement"}
+{"ts": "2026-03-16T01:08:04.313695+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 8, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T01:11:16.668945+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 9, "event_type": "phase_finished", "pair": "implement", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:12:34.354472+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 10, "event_type": "phase_finished", "pair": "implement", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:12:34.355081+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 11, "event_type": "pair_completed", "pair": "implement", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T01:12:34.355303+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 12, "event_type": "pair_started", "pair": "test"}
+{"ts": "2026-03-16T01:12:34.355372+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 13, "event_type": "cycle_started", "pair": "test", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T01:14:55.269362+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 14, "event_type": "phase_finished", "pair": "test", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:16:06.970417+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 15, "event_type": "phase_finished", "pair": "test", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:16:08.970983+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 16, "event_type": "cycle_started", "pair": "test", "cycle": 2, "attempt": 1}
+{"ts": "2026-03-16T01:17:06.181378+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 17, "event_type": "phase_finished", "pair": "test", "phase": "producer", "cycle": 2, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:18:01.869849+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 18, "event_type": "phase_finished", "pair": "test", "phase": "verifier", "cycle": 2, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T01:18:01.870285+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 19, "event_type": "pair_completed", "pair": "test", "cycle": 2, "attempt": 1}
+{"ts": "2026-03-16T01:18:01.870383+00:00", "run_id": "run-20260316T010227Z-5bb07346", "seq": 20, "event_type": "run_finished", "status": "success", "exit_code": 0}

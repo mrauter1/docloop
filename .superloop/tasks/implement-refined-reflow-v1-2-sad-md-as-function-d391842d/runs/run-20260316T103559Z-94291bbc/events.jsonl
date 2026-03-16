@@ -1,0 +1,6 @@
+{"ts": "2026-03-16T10:35:59.369004+00:00", "run_id": "run-20260316T103559Z-94291bbc", "seq": 1, "event_type": "run_started", "workspace": "/workspace/CodexTest/docloop", "pairs": ["plan", "implement", "test"], "max_iterations": 30, "use_git": false, "task_id": "implement-refined-reflow-v1-2-sad-md-as-function-d391842d", "task_root": ".superloop/tasks/implement-refined-reflow-v1-2-sad-md-as-function-d391842d"}
+{"ts": "2026-03-16T10:35:59.369372+00:00", "run_id": "run-20260316T103559Z-94291bbc", "seq": 2, "event_type": "pair_started", "pair": "plan"}
+{"ts": "2026-03-16T10:35:59.369453+00:00", "run_id": "run-20260316T103559Z-94291bbc", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T10:37:59.656532+00:00", "run_id": "run-20260316T103559Z-94291bbc", "seq": 4, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T10:40:30.085507+00:00", "run_id": "run-20260316T103559Z-94291bbc", "seq": 5, "event_type": "phase_finished", "pair": "plan", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-16T10:40:32.086047+00:00", "run_id": "run-20260316T103559Z-94291bbc", "seq": 6, "event_type": "cycle_started", "pair": "plan", "cycle": 2, "attempt": 1}

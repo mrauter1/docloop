@@ -1,0 +1,4 @@
+{"ts": "2026-03-16T10:17:46.021660+00:00", "run_id": "run-20260316T101745Z-ce0ffbbd", "seq": 1, "event_type": "run_started", "workspace": "/workspace/CodexTest/docloop", "pairs": ["plan", "implement", "test"], "max_iterations": 30, "use_git": true, "task_id": "implement-refined-reflow-v1-2-sad-md-as-function-c56ff427", "task_root": ".superloop/tasks/implement-refined-reflow-v1-2-sad-md-as-function-c56ff427"}
+{"ts": "2026-03-16T10:17:46.021937+00:00", "run_id": "run-20260316T101745Z-ce0ffbbd", "seq": 2, "event_type": "pair_started", "pair": "plan"}
+{"ts": "2026-03-16T10:17:46.021992+00:00", "run_id": "run-20260316T101745Z-ce0ffbbd", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-16T10:17:46.266682+00:00", "run_id": "run-20260316T101745Z-ce0ffbbd", "seq": 4, "event_type": "run_finished", "status": "fatal_error", "exit_code": 1}

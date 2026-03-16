@@ -11,13 +11,16 @@
 - Supports `--update` mode with `--update-text`, a frozen baseline snapshot, and dedicated writer/verifier prompts for change requests.
 - Initializes a local git repository in the output workspace if no repository already exists there or above it.
 - Repeatedly runs `codex exec` twice per cycle: once as the writer and once as the verifier.
-- Parses the agent's final stdout for control tags:
-  - `<question>...</question>` pauses for human input and appends the answer to `.docloop/context.md`.
-  - The last non-empty line may be a verifier promise tag:
-    - `<promise>COMPLETE</promise>` ends the loop successfully.
-    - `<promise>INCOMPLETE</promise>` means another writer cycle is required.
-    - `<promise>BLOCKED</promise>` means the verifier cannot proceed safely and the script exits blocked.
-  - If the verifier omits a promise tag, Doc-Loop defaults that pass to `<promise>INCOMPLETE</promise>` and appends this warning to `.docloop/progress.txt`: `No promise tag found, defaulted to <promise>INCOMPLETE</promise>`.
+- Parses loop-control output from agent stdout:
+  - Canonical output is a tagged JSON block:
+    - `<loop-control>{"schema":"docloop.loop_control/v1",...}</loop-control>`
+  - Canonical `kind:"question"` pauses for human input and appends the answer to `.docloop/context.md`.
+  - Canonical `kind:"promise"` supports verifier-only `COMPLETE`, `INCOMPLETE`, and `BLOCKED`.
+  - Legacy compatibility remains enabled:
+    - `<question>...</question>` is still recognized anywhere in stdout.
+    - A legacy `<promise>...</promise>` is still recognized only when it is the last non-empty line.
+  - If the verifier omits a promise tag entirely, Doc-Loop defaults that pass to `<promise>INCOMPLETE</promise>` and appends this warning to `.docloop/progress.txt`: `No promise tag found, defaulted to <promise>INCOMPLETE</promise>`.
+  - Multiple canonical `<loop-control>` blocks, malformed canonical JSON, or canonical output mixed with legacy semantic control tags are hard failures.
 - Makes the verifier update `.docloop/criteria.md` and write actionable feedback to `.docloop/progress.txt` when the document is not ready, balancing completeness against redundancy and unnecessary implementation detail.
 - Commits baseline state, pre-cycle snapshots, writer edits, verifier feedback, human clarifications, and successful completion markers to git.
 
@@ -116,9 +119,9 @@ For each cycle, `docloop.py`:
 4. Commits any writer edits, then runs the verifier using `.docloop/verifier_prompt.md` against the same full workspace context.
 5. If the verifier asks a question, the human answer is appended to `.docloop/context.md`, committed, and the cycle restarts.
 6. If the verifier does not pass the document, it must update `.docloop/criteria.md` and append actionable feedback to `.docloop/progress.txt` for the writer, then the next cycle begins.
-7. If the verifier's last non-empty line is `<promise>COMPLETE</promise>`, the final state is committed and the script exits `0`.
-8. If the verifier's last non-empty line is `<promise>INCOMPLETE</promise>`, the verifier feedback is committed and the next cycle begins.
-9. If the verifier's last non-empty line is `<promise>BLOCKED</promise>`, the verifier feedback is committed and the script exits blocked.
+7. If the verifier emits canonical `{"kind":"promise","promise":"COMPLETE"}` in `<loop-control>` as the final control block, or the legacy final-line `<promise>COMPLETE</promise>`, the final state is committed and the script exits `0`.
+8. If the verifier emits canonical or legacy `INCOMPLETE`, the verifier feedback is committed and the next cycle begins.
+9. If the verifier emits canonical or legacy `BLOCKED`, the verifier feedback is committed and the script exits blocked.
 
 The script sleeps for two seconds between iterations as a cooldown.
 
@@ -139,17 +142,21 @@ Update-mode questions are stricter:
 
 ## Exit Conditions
 
-- Success: the verifier's last non-empty line is `<promise>COMPLETE</promise>`, and the script exits `0`.
-- Blocked: the verifier's last non-empty line is `<promise>BLOCKED</promise>`, and the script exits `2`.
+- Success: the verifier emits canonical or legacy `COMPLETE`, and the script exits `0`.
+- Blocked: the verifier emits canonical or legacy `BLOCKED`, and the script exits `2`.
 - Failure: the maximum iteration count is reached without completion, and the script exits `1`.
 - Interrupt: `Ctrl+C` exits gracefully with code `130`.
 - Fatal dependency or git errors cause immediate exit via `sys.exit(1)`.
 
-## Promise Tag Rules
+## Loop-Control Rules
 
-- Promise tags are verifier-only. The writer must not emit any `<promise>...</promise>` tag.
-- A promise tag is only recognized when it is the last non-empty line of verifier stdout, exactly.
-- Mentioning a promise tag in ordinary prose does not count as a control signal.
+- Canonical output uses one `<loop-control>...</loop-control>` JSON block with schema ID `docloop.loop_control/v1`.
+- Canonical `kind:"question"` and `kind:"promise"` are mutually exclusive; one block represents exactly one decision.
+- Canonical output is the single source of truth. If canonical output is malformed, uses an unknown schema, appears more than once, or is mixed with legacy semantic control tags, Doc-Loop fails fast instead of guessing.
+- Promise decisions are verifier-only. The writer must not emit canonical promise output or legacy `<promise>...</promise>` tags.
+- Legacy `<question>...</question>` output remains recognized anywhere for compatibility.
+- A legacy promise tag is only recognized when it is the last non-empty line of verifier stdout, exactly.
+- Mentioning a legacy promise tag in ordinary prose does not count as a control signal.
 - If no verifier promise tag is present, Doc-Loop treats that verifier pass as `INCOMPLETE` and appends a system warning to `.docloop/progress.txt`, which is part of the next cycle's working-set prompt.
 
 ## Notes
@@ -169,9 +176,9 @@ This repository also includes `superloop.py`, a Codex-native orchestrator for op
 ### Goals
 
 - Turn broad product intent into shipped, reviewed, and tested changes.
-- Preserve low-friction control through the same tags:
-  - `<question>...</question>` for clarification handoff
-  - verifier final line `<promise>COMPLETE|INCOMPLETE|BLOCKED</promise>`
+- Preserve low-friction control through the same loop-control contract:
+  - Canonical `<loop-control>...</loop-control>` JSON is the default
+  - Legacy `<question>...</question>` and verifier final-line `<promise>COMPLETE|INCOMPLETE|BLOCKED</promise>` remain supported for compatibility
 
 ### Optional loop pairs
 
@@ -196,11 +203,22 @@ python3 superloop.py --pairs plan,implement,test
 ### Common options
 
 - `--workspace PATH`: Repository root to operate on (default `.`)
-- `--max-iterations N`: Maximum verifier cycles per enabled pair (default `8`)
+- `--max-iterations N`: Maximum verifier cycles per enabled pair (default `15`)
 - `--model MODEL`: Codex model passed to `codex exec` (default `gpt-5.4`)
 - `--intent TEXT`: Optional initial product intent seeded into `.superloop/context.md`
+- `--task-id ID`: Task workspace slug under `.superloop/tasks/` (new runs require `--task-id` or `--intent`)
+- `--intent-mode {replace,append,preserve}`: How `--intent` mutates task context (default `preserve`)
+- `--resume`: Resume an existing task/run instead of creating a new run
+- `--run-id RUN_ID`: Optional run ID to resume; requires `--resume`
 - `--full-auto-answers`: Automatically answer `<question>` prompts through an extra Codex pass
 - `--no-git`: Disable git initialization and checkpoint commits for this run (also auto-enabled with a warning when `git` is unavailable)
+
+Resume selection rules:
+
+- `--resume --task-id <id> --run-id <run>`: resume the explicit run under the explicit task.
+- `--resume --task-id <id>`: resume the latest run under that task.
+- `--resume --run-id <run>`: locate the task containing that run and resume it.
+- `--resume` only: resume the latest task and then the latest run within that task.
 
 `--pairs` validation notes:
 
@@ -247,4 +265,44 @@ Superloop commit scope and verifier protections:
   - `plan` verifier may only edit `.superloop/plan/`
   - `implement` verifier may only edit `.superloop/implement/`
   - `test` verifier may only edit `.superloop/test/`
+- Multiple canonical `<loop-control>` blocks, malformed canonical payloads, and canonical output mixed with legacy semantic control tags are treated as fatal protocol violations.
 - If a verifier emits `COMPLETE` while criteria checkboxes remain unchecked, Superloop warns and downgrades that pass to `INCOMPLETE`.
+- If a verifier omits any promise output, Superloop appends `No promise tag found, defaulted to <promise>INCOMPLETE</promise>.` to pair feedback and defaults that pass to `INCOMPLETE`.
+
+## Reflow
+
+`reflow.py` is an executable implementation of the Reflow v1.2 runtime specified in `refined_reflow_v1.2/SAD.md`.
+
+### Requirements
+
+- Python 3
+- `PyYAML`
+- Provider CLIs such as `codex` or `claude` available in `PATH`
+
+Install Python dependencies with:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+### Usage
+
+```bash
+python3 reflow.py run <workflow> --workspace /path/to/workspace
+python3 reflow.py status <run_id> --workspace /path/to/workspace
+python3 reflow.py list --workspace /path/to/workspace
+python3 reflow.py reply <run_id> --workspace /path/to/workspace
+python3 reflow.py stop <run_id> --workspace /path/to/workspace
+```
+
+The workspace must contain:
+
+```text
+.reflow/
+  config.yaml
+  workflows/
+    <workflow>/
+      workflow.yaml
+```
+
+Per-run state, history, operator inputs, and iteration artifacts are written under `.reflow/runs/`.

@@ -1,0 +1,4 @@
+# Plan ↔ Plan Verifier Feedback
+
+- 2026-03-16: Replaced the empty task plan with an implementation-ready plan for completing `refined_reflow_v1.2/SAD.md`, explicitly called out the duplicate `reflow_SAD_v1.2.md` risk, defined milestone-by-milestone acceptance criteria, added cross-section interface contracts, and specified a lightweight pytest-based regression guard so later pairs have a concrete convergence target.
+- 2026-03-16 | PLAN-001 | non-blocking | Milestone 4's regression guard is slightly underspecified where it asks for the "presence of the v1.2-only contracts added in the refined draft." A later pair could satisfy that with different phrase subsets and still leave verifier churn about what the minimum invariant set is. Minimal improvement: name the specific must-guard contracts in the plan or handoff notes, such as Section 8.3 questions-block rules, Section 14.4 full-auto answer contract, and Section 17.5 `status`/`list` behavior.

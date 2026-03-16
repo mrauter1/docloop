@@ -9,7 +9,7 @@ Superloop prompts should optimize for four outcomes:
 1. **High-signal progress per cycle** (avoid low-value churn).
 2. **Low false-positive verifier feedback** (only material blockers loop).
 3. **Safe autonomy** (agent acts independently, asks only when needed).
-4. **Deterministic orchestration contracts** (`<question>` and `<promise>` behavior remains predictable).
+4. **Deterministic orchestration contracts** (canonical `<loop-control>` behavior remains predictable and legacy compatibility stays explicit).
 
 ## 2) Prompt architecture pattern (producer/verifier pair)
 
@@ -45,11 +45,11 @@ Use these principles for all producer prompts (`plan`, `implement`, `test`, or n
    - Ask producer to note assumptions and expected side effects.
 
 4. **Clarification discipline**
-   - If ambiguity, logical flaws, breaking-risk, or hidden-behavior risk exists, ask `<question>`.
-   - Clarifying question must include best suggestion/supposition.
+   - If ambiguity, logical flaws, breaking-risk, or hidden-behavior risk exists, ask a canonical `<loop-control>` question block.
+   - Clarifying question must include best suggestion/supposition when the prompt requires it.
 
 5. **No verifier-only control signals**
-   - Producer must not emit `<promise>...</promise>`.
+   - Producer must not emit canonical promise output or legacy `<promise>...</promise>`.
 
 ## 4) Verifier prompt principles
 
@@ -78,16 +78,19 @@ Verifier prompts should be strict on quality but selective on what causes loops.
    - `COMPLETE` must correspond to all criteria checks satisfied.
 
 6. **Clarification discipline**
-   - Use `<question>` only when missing user intent blocks safe evaluation.
+   - Use a canonical `<loop-control>` question block only when missing user intent blocks safe evaluation.
    - Include best suggestion/supposition.
 
-## 5) Control-tag contract (must stay stable)
+## 5) Loop-control contract (must stay synchronized with runtime)
 
 Prompt text must preserve these interface rules:
 
-- `<question>...</question>` for clarification handoff.
-- Verifier final line promise: `<promise>COMPLETE|INCOMPLETE|BLOCKED</promise>`.
+- Canonical output is one `<loop-control>...</loop-control>` JSON block with schema `docloop.loop_control/v1`.
+- Canonical questions use `{"kind":"question","question":"..."}` and may include `best_supposition`.
+- Canonical promises use `{"kind":"promise","promise":"COMPLETE|INCOMPLETE|BLOCKED"}`.
 - Producer should never decide completion.
+- Legacy `<question>...</question>` and verifier final-line `<promise>...</promise>` remain supported only as a compatibility adapter.
+- Canonical output must not be mixed with legacy semantic control tags, and multiple canonical blocks are invalid protocol output.
 
 If extending prompts, keep this contract unchanged unless orchestrator code is explicitly updated too.
 
@@ -100,17 +103,17 @@ When adding a new pair (example: `security`, `migration`, `perf`):
 3. Use blocking/non-blocking severities.
 4. Require evidence-backed blockers.
 5. Keep clarification format consistent.
-6. Keep the same control-tag protocol.
+6. Keep the same loop-control protocol.
 
 Template checklist for a new pair prompt set:
 
 - [ ] Producer prompt has scope-first analysis rule.
 - [ ] Producer prompt defines canonical artifact(s).
-- [ ] Producer prompt has ambiguity/risk `<question>` rule with suggestion.
+- [ ] Producer prompt has canonical `<loop-control>` question guidance with suggestion when needed.
 - [ ] Verifier prompt defines materiality threshold for blockers.
 - [ ] Verifier prompt requires evidence triplet for blockers.
 - [ ] Verifier prompt defines criteria ownership and `COMPLETE` integrity.
-- [ ] Both prompts keep control tags consistent with Superloop runtime.
+- [ ] Both prompts keep loop-control guidance consistent with Superloop runtime.
 
 ## 7) Anti-patterns to avoid
 
@@ -118,7 +121,7 @@ Template checklist for a new pair prompt set:
 2. **Duplicate artifact requirements** that split source of truth.
 3. **Blocking on stylistic nits** (creates loop churn).
 4. **Missing evidence in findings** (high false-positive risk).
-5. **Prompt drift in control tags** (breaks orchestration assumptions).
+5. **Prompt drift in loop-control instructions** (breaks orchestration assumptions).
 
 ## 8) Prompt quality review rubric
 
@@ -129,7 +132,7 @@ When editing any Superloop prompt, review against this rubric:
 - **Scope control**: Does it avoid unrelated work by default?
 - **Risk control**: Are regressions/breaking behavior addressed explicitly?
 - **Loop efficiency**: Does it reduce avoidable `INCOMPLETE` cycles?
-- **Protocol safety**: Are control-tag rules unambiguous and consistent?
+- **Protocol safety**: Are loop-control rules unambiguous and consistent?
 
 ## 9) Change management guidance
 
@@ -139,6 +142,7 @@ For prompt-only changes:
 2. Run existing tests to ensure no behavioral regressions in git tracking/runtime helpers.
 3. Record rationale in PR description (what loop inefficiency or false-positive pattern is targeted).
 4. If possible, evaluate before/after loop metrics (cycles-to-complete, blocker rate, repeated finding rate).
+5. Keep prompt-contract edits and runtime parser/orchestrator edits synchronized; do not change one without the other.
 
 ---
 
