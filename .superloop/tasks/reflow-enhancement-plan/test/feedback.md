@@ -1,3 +1,4 @@
 # Test Author ↔ Test Auditor Feedback
 
 - Added direct regression tests for policy snapshot ignoring, changed escape-symlink violations, and truncated intent-slug hyphen stripping; updated the test strategy with a behavior-to-coverage map and flake controls.
+- TST-001 | non-blocking | No blocking coverage gaps found in the changed `reflow_runtime/policy.py` and `superloop.py` behaviors. Evidence: targeted unit coverage exercises ignored snapshot paths, unchanged vs. changed escape-symlink handling, long explicit task IDs, truncation bounds, and trailing-hyphen stripping; integration coverage also verifies reserved iteration artifacts are ignored during real shell and agent runs. Residual risk is low because assertions check concrete policy violations, persisted run state, and task-ID shapes rather than only command success.
