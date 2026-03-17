@@ -52,7 +52,7 @@ The framework requests structured output when the provider supports it.
 If native structure enforcement is unavailable/incomplete, it still proceeds with strict JSON parsing and validation behavior.
 
 ### 4) Parse and validate
-Model output is parsed as JSON and validated against the declared constraints.
+Model output is parsed as JSON and validated against the declared constraints using provider-agnostic, best-effort JSON Schema validation. Recognized `$schema` drafts use their matching validator; missing or unknown `$schema` falls back to Draft 7.
 
 ### 5) Repair/retry (if needed)
 If output is malformed or invalid:

@@ -3,29 +3,121 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
+
+from jsonschema import Draft3Validator, Draft4Validator, Draft6Validator, Draft7Validator
+from jsonschema import FormatChecker, exceptions as jsonschema_exceptions
 
 from .errors import SchemaValidationError
 
-_TYPE_NAMES = {"object", "array", "string", "number", "integer", "boolean", "null"}
+_FORMAT_CHECKER = FormatChecker()
+_DEFAULT_VALIDATOR = Draft7Validator
+
+try:
+    from jsonschema import Draft201909Validator
+except ImportError:  # pragma: no cover - only relevant on older jsonschema versions
+    Draft201909Validator = None
+
+try:
+    from jsonschema import Draft202012Validator
+except ImportError:  # pragma: no cover - only relevant on older jsonschema versions
+    Draft202012Validator = None
+
+_LATEST_KNOWN_VALIDATOR = Draft202012Validator or Draft201909Validator or Draft7Validator
+
+
+def _build_validator_lookup() -> dict[str, type[Any]]:
+    validators_by_uri: dict[str, type[Any]] = {}
+    aliases = [
+        (
+            _LATEST_KNOWN_VALIDATOR,
+            (
+                "http://json-schema.org/schema",
+                "https://json-schema.org/schema",
+            ),
+        ),
+        (
+            Draft3Validator,
+            (
+                "http://json-schema.org/draft-03/schema",
+                "https://json-schema.org/draft-03/schema",
+            ),
+        ),
+        (
+            Draft4Validator,
+            (
+                "http://json-schema.org/draft-04/schema",
+                "https://json-schema.org/draft-04/schema",
+            ),
+        ),
+        (
+            Draft6Validator,
+            (
+                "http://json-schema.org/draft-06/schema",
+                "https://json-schema.org/draft-06/schema",
+            ),
+        ),
+        (
+            Draft7Validator,
+            (
+                "http://json-schema.org/draft-07/schema",
+                "https://json-schema.org/draft-07/schema",
+            ),
+        ),
+        (
+            Draft201909Validator,
+            (
+                "http://json-schema.org/draft/2019-09/schema",
+                "https://json-schema.org/draft/2019-09/schema",
+            ),
+        ),
+        (
+            Draft202012Validator,
+            (
+                "http://json-schema.org/draft/2020-12/schema",
+                "https://json-schema.org/draft/2020-12/schema",
+            ),
+        ),
+    ]
+    for validator_cls, uris in aliases:
+        if validator_cls is None:
+            continue
+        for uri in uris:
+            validators_by_uri[uri.strip().rstrip("#")] = validator_cls
+    return validators_by_uri
+
+
+_KNOWN_VALIDATORS = _build_validator_lookup()
 
 
 def ensure_json_schema(schema: Mapping[str, Any], *, label: str = "schema") -> dict[str, Any]:
     if not isinstance(schema, Mapping):
         raise SchemaValidationError(f"{label} must be a mapping")
-    normalized = dict(schema)
-    ensure_json_compatible(normalized, label=label)
+
+    ensure_json_compatible(schema, label=label)
     try:
-        deterministic_json_dumps(normalized)
+        normalized = json.loads(deterministic_json_dumps(schema))
     except (TypeError, ValueError) as exc:
         raise SchemaValidationError(f"{label} must be JSON-serializable") from exc
-    _validate_schema_document(normalized, label=label)
+
+    _ensure_pattern_keywords_compile(normalized, label=label)
+
+    validator_cls = _resolve_validator_class(normalized)
+    try:
+        validator_cls.check_schema(normalized)
+    except jsonschema_exceptions.SchemaError as exc:
+        raise SchemaValidationError(_format_schema_error(exc, label=label)) from exc
     return normalized
 
 
 def validate_json(value: Any, schema: Mapping[str, Any], *, path: str = "$") -> None:
-    _validate_value(value, schema, path)
+    validator_cls = _resolve_validator_class(schema)
+    validator = validator_cls(schema, format_checker=_FORMAT_CHECKER)
+    error = jsonschema_exceptions.best_match(validator.iter_errors(value))
+    if error is None:
+        return
+    raise SchemaValidationError(_format_validation_error(error, root_path=path))
 
 
 def deterministic_json_dumps(value: Any) -> str:
@@ -57,236 +149,163 @@ def ensure_json_compatible(value: Any, *, label: str = "value") -> None:
     raise SchemaValidationError(f"{label} must contain only JSON-compatible values")
 
 
-def _validate_schema_document(schema: Mapping[str, Any], *, label: str) -> None:
-    schema_type = schema.get("type")
-    if schema_type is not None:
-        allowed_types = schema_type if isinstance(schema_type, list) else [schema_type]
-        if not allowed_types or any(item not in _TYPE_NAMES for item in allowed_types):
-            raise SchemaValidationError(f"{label} has unsupported type declaration")
-
-    if "enum" in schema and not isinstance(schema["enum"], list):
-        raise SchemaValidationError(f"{label}.enum must be a list")
-
-    for key in ("properties", "patternProperties"):
-        if key in schema and not isinstance(schema[key], Mapping):
-            raise SchemaValidationError(f"{label}.{key} must be a mapping")
-
-    if "required" in schema and (
-        not isinstance(schema["required"], list) or any(not isinstance(item, str) for item in schema["required"])
-    ):
-        raise SchemaValidationError(f"{label}.required must be a list of strings")
-
-    if "items" in schema and not isinstance(schema["items"], Mapping):
-        raise SchemaValidationError(f"{label}.items must be a mapping")
-
-    if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], (bool, Mapping)):
-        raise SchemaValidationError(f"{label}.additionalProperties must be a boolean or mapping")
-
-    _validate_number_keyword(schema, key="minimum", label=label)
-    _validate_number_keyword(schema, key="maximum", label=label)
-    _validate_non_negative_integer_keyword(schema, key="minLength", label=label)
-    _validate_non_negative_integer_keyword(schema, key="maxLength", label=label)
-    _validate_non_negative_integer_keyword(schema, key="minItems", label=label)
-    _validate_non_negative_integer_keyword(schema, key="maxItems", label=label)
-    _validate_pattern_keyword(schema, key="pattern", label=label)
-    _validate_min_max_pair(schema, minimum_key="minimum", maximum_key="maximum", label=label)
-    _validate_min_max_pair(schema, minimum_key="minLength", maximum_key="maxLength", label=label)
-    _validate_min_max_pair(schema, minimum_key="minItems", maximum_key="maxItems", label=label)
-
-    for combiner in ("oneOf", "anyOf", "allOf"):
-        if combiner in schema:
-            variants = schema[combiner]
-            if not isinstance(variants, list) or not variants or any(not isinstance(item, Mapping) for item in variants):
-                raise SchemaValidationError(f"{label}.{combiner} must be a non-empty list of mappings")
-            for index, variant in enumerate(variants):
-                _validate_schema_document(variant, label=f"{label}.{combiner}[{index}]")
-
-    if "properties" in schema:
-        for prop_name, prop_schema in schema["properties"].items():
-            if not isinstance(prop_name, str) or not isinstance(prop_schema, Mapping):
-                raise SchemaValidationError(f"{label}.properties entries must map string keys to mappings")
-            _validate_schema_document(prop_schema, label=f"{label}.properties.{prop_name}")
-
-    if "patternProperties" in schema:
-        for pattern, prop_schema in schema["patternProperties"].items():
-            if not isinstance(pattern, str):
-                raise SchemaValidationError(f"{label}.patternProperties keys must be strings")
-            _compile_pattern(pattern, f"{label}.patternProperties[{pattern!r}]")
-            if not isinstance(prop_schema, Mapping):
-                raise SchemaValidationError(f"{label}.patternProperties entries must map string keys to mappings")
-            _validate_schema_document(prop_schema, label=f"{label}.patternProperties[{pattern!r}]")
-
-    if isinstance(schema.get("additionalProperties"), Mapping):
-        _validate_schema_document(schema["additionalProperties"], label=f"{label}.additionalProperties")
-
-    if "items" in schema:
-        _validate_schema_document(schema["items"], label=f"{label}.items")
+def _resolve_validator_class(schema: Mapping[str, Any]) -> type[Any]:
+    schema_uri = schema.get("$schema")
+    if not isinstance(schema_uri, str) or not schema_uri.strip():
+        return _DEFAULT_VALIDATOR
+    return _KNOWN_VALIDATORS.get(_normalize_schema_uri(schema_uri), _DEFAULT_VALIDATOR)
 
 
-def _validate_number_keyword(schema: Mapping[str, Any], *, key: str, label: str) -> None:
-    value = schema.get(key)
-    if value is not None and not _is_number(value):
-        raise SchemaValidationError(f"{label}.{key} must be a number")
+def _normalize_schema_uri(uri: str) -> str:
+    return uri.strip().rstrip("#")
 
 
-def _validate_non_negative_integer_keyword(schema: Mapping[str, Any], *, key: str, label: str) -> None:
-    value = schema.get(key)
-    if value is None:
+def _ensure_pattern_keywords_compile(value: Any, *, label: str) -> None:
+    if not isinstance(value, Mapping):
         return
-    if not _is_integer(value) or value < 0:
-        raise SchemaValidationError(f"{label}.{key} must be a non-negative integer")
+
+    pattern = value.get("pattern")
+    if pattern is not None:
+        _compile_pattern(pattern, f"{label}.pattern")
+
+    pattern_properties = value.get("patternProperties")
+    if isinstance(pattern_properties, Mapping):
+        for pattern_key, subschema in pattern_properties.items():
+            _compile_pattern(pattern_key, f"{label}.patternProperties[{pattern_key!r}]")
+            _recurse_schema(subschema, label=f"{label}.patternProperties[{pattern_key!r}]")
+
+    _recurse_schema_mapping(value.get("properties"), label=f"{label}.properties")
+    _recurse_schema_mapping(value.get("definitions"), label=f"{label}.definitions")
+    _recurse_schema_mapping(value.get("$defs"), label=f"{label}.$defs")
+    _recurse_schema_mapping(value.get("dependentSchemas"), label=f"{label}.dependentSchemas")
+
+    _recurse_schema(value.get("additionalProperties"), label=f"{label}.additionalProperties")
+    _recurse_schema(value.get("additionalItems"), label=f"{label}.additionalItems")
+    _recurse_schema(value.get("contains"), label=f"{label}.contains")
+    _recurse_schema(value.get("contentSchema"), label=f"{label}.contentSchema")
+    _recurse_schema(value.get("else"), label=f"{label}.else")
+    _recurse_schema(value.get("if"), label=f"{label}.if")
+    _recurse_schema(value.get("items"), label=f"{label}.items")
+    _recurse_schema(value.get("not"), label=f"{label}.not")
+    _recurse_schema(value.get("propertyNames"), label=f"{label}.propertyNames")
+    _recurse_schema(value.get("then"), label=f"{label}.then")
+    _recurse_schema(value.get("unevaluatedItems"), label=f"{label}.unevaluatedItems")
+    _recurse_schema(value.get("unevaluatedProperties"), label=f"{label}.unevaluatedProperties")
+
+    _recurse_schema_list(value.get("allOf"), label=f"{label}.allOf")
+    _recurse_schema_list(value.get("anyOf"), label=f"{label}.anyOf")
+    _recurse_schema_list(value.get("oneOf"), label=f"{label}.oneOf")
+    _recurse_schema_list(value.get("prefixItems"), label=f"{label}.prefixItems")
+
+    dependencies = value.get("dependencies")
+    if isinstance(dependencies, Mapping):
+        for dependency_key, dependency_value in dependencies.items():
+            if isinstance(dependency_value, Mapping):
+                _recurse_schema(
+                    dependency_value,
+                    label=f"{label}.dependencies.{dependency_key}",
+                )
 
 
-def _validate_pattern_keyword(schema: Mapping[str, Any], *, key: str, label: str) -> None:
-    value = schema.get(key)
-    if value is None:
+def _recurse_schema(value: Any, *, label: str) -> None:
+    if isinstance(value, Mapping):
+        _ensure_pattern_keywords_compile(value, label=label)
         return
-    if not isinstance(value, str):
-        raise SchemaValidationError(f"{label}.{key} must be a string")
-    _compile_pattern(value, f"{label}.{key}")
+
+    if isinstance(value, list):
+        _recurse_schema_list(value, label=label)
 
 
-def _validate_min_max_pair(
-    schema: Mapping[str, Any], *, minimum_key: str, maximum_key: str, label: str
-) -> None:
-    minimum = schema.get(minimum_key)
-    maximum = schema.get(maximum_key)
-    if minimum is not None and maximum is not None and minimum > maximum:
-        raise SchemaValidationError(f"{label}.{minimum_key} must be <= {maximum_key}")
+def _recurse_schema_list(value: Any, *, label: str) -> None:
+    if not isinstance(value, list):
+        return
+    for index, item in enumerate(value):
+        _recurse_schema(item, label=f"{label}[{index}]")
 
 
-def _compile_pattern(pattern: str, label: str) -> None:
+def _recurse_schema_mapping(value: Any, *, label: str) -> None:
+    if not isinstance(value, Mapping):
+        return
+    for key, item in value.items():
+        _recurse_schema(item, label=f"{label}.{key}")
+
+
+def _compile_pattern(pattern: Any, label: str) -> None:
+    if not isinstance(pattern, str):
+        return
     try:
         re.compile(pattern)
     except re.error as exc:
         raise SchemaValidationError(f"{label} must be a valid regex: {exc}") from exc
 
 
-def _validate_value(value: Any, schema: Mapping[str, Any], path: str) -> None:
-    if "const" in schema and value != schema["const"]:
-        raise SchemaValidationError(f"{path} must equal {schema['const']!r}")
-
-    if "enum" in schema and value not in schema["enum"]:
-        raise SchemaValidationError(f"{path} must be one of {schema['enum']!r}")
-
-    if "allOf" in schema:
-        for variant in schema["allOf"]:
-            _validate_value(value, variant, path)
-
-    if "anyOf" in schema:
-        errors: list[str] = []
-        for variant in schema["anyOf"]:
-            try:
-                _validate_value(value, variant, path)
-                break
-            except SchemaValidationError as exc:
-                errors.append(exc.message)
-        else:
-            raise SchemaValidationError(f"{path} failed anyOf validation: {errors[-1] if errors else 'no variants'}")
-
-    if "oneOf" in schema:
-        matches = 0
-        last_error = "no variants"
-        for variant in schema["oneOf"]:
-            try:
-                _validate_value(value, variant, path)
-                matches += 1
-            except SchemaValidationError as exc:
-                last_error = exc.message
-        if matches != 1:
-            raise SchemaValidationError(f"{path} must match exactly one variant: {last_error}")
-
-    schema_type = schema.get("type")
-    if schema_type is not None:
-        allowed_types = schema_type if isinstance(schema_type, list) else [schema_type]
-        if not any(_matches_type(value, item) for item in allowed_types):
-            raise SchemaValidationError(f"{path} must be of type {allowed_types!r}")
-
-    if isinstance(value, str):
-        _validate_string(value, schema, path)
-    elif _is_integer(value):
-        _validate_number(value, schema, path)
-    elif _is_number(value):
-        _validate_number(value, schema, path)
-    elif isinstance(value, list):
-        _validate_array(value, schema, path)
-    elif isinstance(value, Mapping):
-        _validate_object(value, schema, path)
+def _format_schema_error(error: jsonschema_exceptions.SchemaError, *, label: str) -> str:
+    location = _compose_path(label, error.path)
+    return f"{location}: {error.message}"
 
 
-def _validate_string(value: str, schema: Mapping[str, Any], path: str) -> None:
-    min_length = schema.get("minLength")
-    if min_length is not None and len(value) < min_length:
-        raise SchemaValidationError(f"{path} must have length >= {min_length}")
+def _format_validation_error(error: jsonschema_exceptions.ValidationError, *, root_path: str) -> str:
+    if error.validator == "required":
+        missing_property = _extract_required_property(error)
+        if missing_property is not None:
+            return f"{_compose_path(root_path, [*error.absolute_path, missing_property])} is required"
 
-    max_length = schema.get("maxLength")
-    if max_length is not None and len(value) > max_length:
-        raise SchemaValidationError(f"{path} must have length <= {max_length}")
+    if error.validator == "additionalProperties":
+        unexpected_properties = _extract_additional_properties(error)
+        if unexpected_properties:
+            return "; ".join(
+                f"{_compose_path(root_path, [*error.absolute_path, property_name])} is not allowed"
+                for property_name in unexpected_properties
+            )
 
-    pattern = schema.get("pattern")
-    if pattern is not None and re.search(pattern, value) is None:
-        raise SchemaValidationError(f"{path} must match pattern {pattern!r}")
-
-
-def _validate_number(value: int | float, schema: Mapping[str, Any], path: str) -> None:
-    minimum = schema.get("minimum")
-    if minimum is not None and value < minimum:
-        raise SchemaValidationError(f"{path} must be >= {minimum}")
-
-    maximum = schema.get("maximum")
-    if maximum is not None and value > maximum:
-        raise SchemaValidationError(f"{path} must be <= {maximum}")
+    location = _compose_path(root_path, error.absolute_path)
+    if location == root_path:
+        return f"{location}: {error.message}"
+    return f"{location} {error.message}"
 
 
-def _validate_array(value: list[Any], schema: Mapping[str, Any], path: str) -> None:
-    min_items = schema.get("minItems")
-    if min_items is not None and len(value) < min_items:
-        raise SchemaValidationError(f"{path} must have at least {min_items} items")
-
-    max_items = schema.get("maxItems")
-    if max_items is not None and len(value) > max_items:
-        raise SchemaValidationError(f"{path} must have at most {max_items} items")
-
-    items_schema = schema.get("items")
-    if isinstance(items_schema, Mapping):
-        for index, item in enumerate(value):
-            _validate_value(item, items_schema, f"{path}[{index}]")
+def _extract_required_property(error: jsonschema_exceptions.ValidationError) -> str | None:
+    if not isinstance(error.validator_value, Sequence):
+        return None
+    for field in error.validator_value:
+        if field not in error.instance:
+            return field if isinstance(field, str) else None
+    return None
 
 
-def _validate_object(value: Mapping[str, Any], schema: Mapping[str, Any], path: str) -> None:
-    required = schema.get("required", [])
-    for field in required:
-        if field not in value:
-            raise SchemaValidationError(f"{path}.{field} is required")
+def _extract_additional_properties(error: jsonschema_exceptions.ValidationError) -> list[str] | None:
+    if error.validator_value is not False:
+        return None
+    if not isinstance(error.instance, Mapping) or not isinstance(error.schema, Mapping):
+        return None
 
-    properties = schema.get("properties", {})
-    additional = schema.get("additionalProperties", True)
+    properties = error.schema.get("properties", {})
+    property_names = set(properties) if isinstance(properties, Mapping) else set()
 
-    for key, item in value.items():
-        child_path = f"{path}.{key}"
-        if key in properties:
-            _validate_value(item, properties[key], child_path)
+    pattern_properties = error.schema.get("patternProperties", {})
+    patterns = list(pattern_properties) if isinstance(pattern_properties, Mapping) else []
+
+    unexpected: list[str] = []
+    for key in error.instance:
+        if not isinstance(key, str):
             continue
-        if additional is False:
-            raise SchemaValidationError(f"{child_path} is not allowed")
-        if isinstance(additional, Mapping):
-            _validate_value(item, additional, child_path)
+        if key in property_names:
+            continue
+        if any(re.search(pattern, key) is not None for pattern in patterns):
+            continue
+        unexpected.append(key)
+
+    return unexpected or None
 
 
-def _matches_type(value: Any, schema_type: str) -> bool:
-    return {
-        "object": isinstance(value, Mapping),
-        "array": isinstance(value, list),
-        "string": isinstance(value, str),
-        "number": _is_number(value),
-        "integer": _is_integer(value),
-        "boolean": isinstance(value, bool),
-        "null": value is None,
-    }[schema_type]
-
-
-def _is_integer(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+def _compose_path(root: str, segments: Sequence[Any]) -> str:
+    path = root
+    for segment in segments:
+        if isinstance(segment, int):
+            path += f"[{segment}]"
+            continue
+        path += f".{segment}"
+    return path
 
 
 def _is_number(value: Any) -> bool:

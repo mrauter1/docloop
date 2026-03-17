@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import jsonschema
 import pytest
 
 from fuzzy import Command, FrameworkError, LLMAdapter, LLMOps, classify, dispatch, drop, eval_bool, extract
 from fuzzy.adapters import OpenAIAdapter, OpenRouterAdapter, _http_error_category
-from fuzzy.errors import ProviderError
+from fuzzy.errors import ProviderError, SchemaValidationError
+from fuzzy.schema import ensure_json_schema, validate_json
 
 
 class FakeAdapter(LLMAdapter):
@@ -110,6 +112,127 @@ def test_extract_returns_model_instance():
     assert value.age == 31
 
 
+def test_schema_missing_schema_uri_defaults_to_draft7():
+    schema = ensure_json_schema(
+        {
+            "type": "array",
+            "items": [{"type": "string"}, {"type": "integer"}],
+            "additionalItems": False,
+        }
+    )
+
+    validate_json(["Ada", 31], schema)
+
+    with pytest.raises(SchemaValidationError):
+        validate_json(["Ada", "31"], schema)
+
+
+def test_schema_unknown_schema_uri_falls_back_to_draft7():
+    schema = ensure_json_schema(
+        {
+            "$schema": "https://example.com/custom-schema",
+            "type": "array",
+            "items": [{"type": "string"}, {"type": "integer"}],
+            "additionalItems": False,
+        }
+    )
+
+    validate_json(["Ada", 31], schema)
+
+    with pytest.raises(SchemaValidationError):
+        validate_json(["Ada", "31"], schema)
+
+
+@pytest.mark.skipif(getattr(jsonschema, "Draft202012Validator", None) is None, reason="jsonschema 4.x required")
+def test_schema_known_202012_uri_uses_matching_validator():
+    schema = ensure_json_schema(
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "array",
+            "prefixItems": [{"type": "string"}],
+            "items": False,
+        }
+    )
+
+    validate_json(["Ada"], schema)
+
+    with pytest.raises(SchemaValidationError):
+        validate_json(["Ada", "extra"], schema)
+
+
+def test_extract_supports_standard_json_schema_refs():
+    adapter = FakeAdapter(['{"person":{"name":"Ada","age":31}}'])
+
+    value = asyncio.run(
+        extract(
+            adapter=adapter,
+            model="gpt-test",
+            context={"person": "Ada"},
+            schema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {"person": {"$ref": "#/definitions/person"}},
+                "required": ["person"],
+                "additionalProperties": False,
+                "definitions": {
+                    "person": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer", "minimum": 0},
+                        },
+                        "required": ["name", "age"],
+                        "additionalProperties": False,
+                    }
+                },
+            },
+        )
+    )
+
+    assert value == {"person": {"name": "Ada", "age": 31}}
+
+
+def test_extract_does_not_treat_const_payloads_as_nested_schemas():
+    adapter = FakeAdapter(['{"pattern":"("}'])
+
+    value = asyncio.run(
+        extract(
+            adapter=adapter,
+            model="gpt-test",
+            context={"pattern": "("},
+            schema={"const": {"pattern": "("}},
+        )
+    )
+
+    assert value == {"pattern": "("}
+
+
+def test_extract_formats_additional_properties_structurally():
+    adapter = FakeAdapter(['{"name":"Ada","x-note":"ok","age":31,"extra":true}'])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            extract(
+                adapter=adapter,
+                model="gpt-test",
+                context={"person": "Ada"},
+                max_attempts=1,
+                schema={
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "patternProperties": {"^x-": {"type": "string"}},
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "validation_exhausted"
+    assert exc.final_validation_category == "schema_invalid"
+    assert exc.message == "$.age is not allowed; $.extra is not allowed"
+
+
 def test_extract_rejects_unsupported_model_type():
     adapter = FakeAdapter([])
 
@@ -129,6 +252,25 @@ def test_extract_rejects_unsupported_model_type():
     exc = exc_info.value
     assert exc.category == "unsupported_runtime"
     assert exc.attempt_count == 0
+
+
+def test_extract_rejects_top_level_boolean_schema_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            extract(
+                adapter=adapter,
+                model="gpt-test",
+                context={"x": 1},
+                schema=True,
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
 
 
 def test_dispatch_validates_command_args_before_execution():
@@ -151,7 +293,7 @@ def test_dispatch_validates_command_args_before_execution():
                     description="Send an email",
                     input_schema={
                         "type": "object",
-                        "properties": {"to": {"type": "string", "pattern": ".+@.+"}},
+                        "properties": {"to": {"type": "string", "format": "email"}},
                         "required": ["to"],
                         "additionalProperties": False,
                     },
@@ -186,7 +328,7 @@ def test_dispatch_command_input_model_type_materializes_for_executor_only():
         def model_json_schema(cls):
             return {
                 "type": "object",
-                "properties": {"to": {"type": "string", "pattern": ".+@.+"}},
+                "properties": {"to": {"type": "string", "format": "email"}},
                 "required": ["to"],
                 "additionalProperties": False,
             }
@@ -215,6 +357,56 @@ def test_dispatch_command_input_model_type_materializes_for_executor_only():
     assert len(executed) == 1
     assert isinstance(executed[0], EmailArgs)
     assert executed[0].to == "user@example.com"
+
+
+def test_dispatch_supports_conditional_json_schema_keywords():
+    adapter = FakeAdapter(
+        [
+            '{"kind":"command","command":{"name":"notify","args":{"kind":"email"}}}',
+            '{"kind":"command","command":{"name":"notify","args":{"kind":"email","email":"user@example.com"}}}',
+        ]
+    )
+    executed = []
+
+    result = asyncio.run(
+        dispatch(
+            adapter=adapter,
+            model="gpt-test",
+            context={"intent": "notify"},
+            commands=[
+                Command(
+                    name="notify",
+                    input_schema={
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "properties": {
+                            "kind": {"enum": ["email", "sms"]},
+                            "email": {"type": "string"},
+                            "number": {"type": "string"},
+                        },
+                        "required": ["kind"],
+                        "allOf": [
+                            {
+                                "if": {"properties": {"kind": {"const": "email"}}},
+                                "then": {"required": ["email"]},
+                            },
+                            {
+                                "if": {"properties": {"kind": {"const": "sms"}}},
+                                "then": {"required": ["number"]},
+                            },
+                        ],
+                        "additionalProperties": False,
+                    },
+                    executor=lambda args: executed.append(args) or {"status": "sent"},
+                )
+            ],
+            auto_execute=True,
+        )
+    )
+
+    assert result["decision"]["command"]["args"] == {"kind": "email", "email": "user@example.com"}
+    assert executed == [{"kind": "email", "email": "user@example.com"}]
+    assert "command_args_invalid" in adapter.requests[1]["instructions"]
 
 
 def test_dispatch_command_output_model_type_returns_model_instance():

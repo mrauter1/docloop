@@ -51,7 +51,8 @@ Fuzzy is logically stateless across calls. The framework may keep in-memory conf
 ### 4.2 Output Validation
 - Every LLM-backed primitive MUST declare an explicit target shape before the provider call.
 - A model response is successful only if it can be parsed as JSON and validated against the primitive's declared constraints.
-- Native provider-side structured output enforcement may be used when available, but provider support does not remove the requirement for local parsing and validation.
+- Local schema and instance validation MUST be provider-agnostic and best-effort. For mapping-based JSON Schemas with a recognized `$schema` metaschema URI, the implementation MUST use the matching validator draft. If `$schema` is missing or unrecognized, the implementation MUST fall back to Draft 7.
+- Native provider-side structured output enforcement may be used when available, but provider support does not remove the requirement for local parsing and validation. The framework MUST NOT add provider-specific schema compatibility restrictions at the local validation layer.
 
 ### 4.3 Failure Boundary
 - Caller configuration errors MUST fail before any provider call.
@@ -93,7 +94,7 @@ The public primitives return one of these categories:
 - an instance of the caller-provided model type when model-type validation is supported in the runtime.
 
 Supported schema/model forms:
-- JSON Schema input MUST be a Python mapping representing one complete JSON Schema document. The architecture requires support for schema keywords needed to validate JSON object, array, string, number, integer, boolean, and null values, including `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `oneOf`, `anyOf`, `allOf`, `minimum`, `maximum`, `minLength`, `maxLength`, `minItems`, `maxItems`, and `pattern`. Other keywords MAY be supported, but are not required for conformance.
+- JSON Schema input MUST be a Python mapping representing one complete JSON Schema document. Top-level boolean schemas are intentionally unsupported. The implementation MUST validate both schema documents and instance values using a standards-conformant JSON Schema validator for a recognized `$schema` draft when available, and otherwise fall back to Draft 7. The implementation MAY additionally reject schemas that are not JSON-serializable or that contain invalid regular expressions before any provider call.
 - A supported model type is a Python class whose runtime exposes both `model_json_schema()` and `model_validate(...)` methods with deterministic validation semantics for JSON-compatible input. The framework MUST derive the provider-facing output contract from `model_json_schema()` and MUST construct the returned instance through `model_validate(...)`.
 
 If model-type support is unavailable in the runtime, the implementation MUST reject model-type input during argument validation rather than silently degrading behavior.
