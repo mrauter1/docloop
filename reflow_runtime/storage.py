@@ -55,13 +55,14 @@ class RunStore:
                 return
         self.active_path.unlink(missing_ok=True)
 
-    def create_run(self, workflow_name: str, steps: list[str], entry: str) -> RunState:
+    def create_run(self, workflow_name: str, steps: list[str], entry: str, task: str | None = None) -> RunState:
         self.ensure_layout()
         started_at = utc_now()
         run_id = f"run_{started_at.replace('-', '').replace(':', '').replace('T', 'T').replace('Z', 'Z')}_{uuid.uuid4().hex[:8]}"
         run = RunState(
             run_id=run_id,
             workflow=workflow_name,
+            task=task,
             status="running",
             current_step=entry,
             step_loops={name: 0 for name in steps},
@@ -176,6 +177,7 @@ class RunStore:
         question_count: int,
         decision_value: str | None,
         required_files_missing: list[str],
+        context_present: dict[str, bool] | None = None,
         command_text: str | None = None,
     ) -> None:
         meta = json.loads(ctx.meta_path.read_text(encoding="utf-8"))
@@ -194,6 +196,8 @@ class RunStore:
         )
         if command_text is not None:
             meta["command_text"] = command_text
+        if context_present is not None:
+            meta["context_present"] = dict(context_present)
         atomic_write_json(ctx.meta_path, meta)
         self.append_history(
             run.run_id,

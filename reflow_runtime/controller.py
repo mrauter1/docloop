@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
 import signal
 import sys
 import time
 from pathlib import Path
 
-from .loaders import load_config, load_instruction_body, load_workflow, resolve_provider_for_step
+from .loaders import collect_workflow_validation_errors, load_config, load_workflow, resolve_provider_for_step
 from .models import (
     AgentStep,
     AwaitingInputError,
@@ -37,17 +39,19 @@ from .models import (
 from .policy import evaluate_policy, snapshot_workspace
 from .protocol import malformed_control_warning, parse_agent_outcome, parse_full_auto_answers, render_agent_request
 from .providers import build_shell_argv, invoke_provider, invoke_shell
+from .scaffold import write_scaffold
 from .storage import RunStore, append_operator_inputs, is_pid_alive
 
 
-def run_new_workflow(workspace: Path, workflow_name: str, full_auto: bool) -> int:
+def run_new_workflow(workspace: Path, workflow_name: str, full_auto: bool, task: str | None = None) -> int:
     config = load_config(workspace)
     workflow = load_workflow(workspace, workflow_name, config)
+    task = _normalize_task_for_workflow(workflow.name, workflow.input_mode, task)
     store = RunStore(workspace)
     _refuse_if_active_conflict(store)
-    run = store.create_run(workflow.name, list(workflow.steps), workflow.entry)
+    run = store.create_run(workflow.name, list(workflow.steps), workflow.entry, task=task)
     store.write_active(run, os.getpid())
-    store.append_history(run.run_id, "run_started", workflow=workflow.name, entry_step=workflow.entry)
+    store.append_history(run.run_id, "run_started", workflow=workflow.name, entry_step=workflow.entry, task=task)
     return _run_with_stop_guard(
         store,
         run,
@@ -98,11 +102,15 @@ def stop_run(workspace: Path, run_id: str) -> int:
     return 0
 
 
-def status_run(workspace: Path, run_id: str) -> int:
+def status_run(workspace: Path, run_id: str, verbose: bool = False) -> int:
     store = RunStore(workspace)
     run = store.load_run(run_id)
+    config = load_config(workspace)
+    workflow = load_workflow(workspace, run.workflow, config)
     print(f"run_id: {run.run_id}")
     print(f"workflow: {run.workflow}")
+    if run.task is not None:
+        print(f"task: {run.task}")
     print(f"status: {run.status}")
     print(f"current_step: {run.current_step}")
     print(f"cycle_count: {run.cycle_count}")
@@ -116,6 +124,18 @@ def status_run(workspace: Path, run_id: str) -> int:
     if run.status == STATUS_FAILED:
         print(f"failure_type: {run.failure_type}")
         print(f"failure_reason: {run.failure_reason}")
+    if verbose:
+        step = workflow.steps[run.current_step]
+        if isinstance(step, AgentStep):
+            context_present = _load_latest_context_present(store, run)
+            for entry in step.context:
+                present = context_present.get(entry.path)
+                if present is None:
+                    present = _context_path_exists(workspace, workflow, entry.path)
+                suffix = entry.path if present else f"{entry.path} (not present)"
+                print(f"context: {suffix} - {entry.as_description}")
+            for entry in step.produces:
+                print(f"expected_output: {entry.path} - {entry.as_description}")
     return 0
 
 
@@ -133,6 +153,65 @@ def list_runs(workspace: Path) -> int:
             runs.append((run.started_at, run.run_id, run.workflow, run.status, run.updated_at))
     for _started_at, run_id, workflow, status, updated_at in sorted(runs, reverse=True):
         print(f"{run_id}\t{workflow}\t{status}\t{updated_at}")
+    return 0
+
+
+def validate_workflow(workspace: Path, workflow_name: str) -> int:
+    config = load_config(workspace)
+    print("Config: ok")
+    errors = collect_workflow_validation_errors(workspace, workflow_name, config)
+    if errors:
+        print(f"Workflow '{workflow_name}': FAILED")
+        for error in errors:
+            print(f"  - {error}")
+        return 25
+
+    workflow = load_workflow(workspace, workflow_name, config)
+    providers = sorted(
+        {
+            resolve_provider_for_step(config, workflow, step).name
+            for step in workflow.steps.values()
+            if isinstance(step, AgentStep)
+        }
+    )
+    providers_display = ", ".join(providers)
+    print(f"Workflow '{workflow.name}': ok")
+    print(f"  Steps: {', '.join(workflow.steps)}")
+    print(f"  Entry: {workflow.entry}")
+    print(f"  Providers: {providers_display}")
+    return 0
+
+
+def init_workflow(
+    workspace: Path,
+    workflow_name: str,
+    *,
+    template_name: str,
+    provider_kind: str,
+    target: str,
+) -> int:
+    result = write_scaffold(
+        workspace,
+        workflow_name,
+        template_name=template_name,
+        provider_kind=provider_kind,
+        target=target,
+    )
+    config = load_config(workspace)
+    errors = collect_workflow_validation_errors(workspace, workflow_name, config)
+    if errors:
+        raise ValueError(f"generated workflow {workflow_name!r} is invalid: {'; '.join(errors)}")
+    print(f"Workflow '{workflow_name}' initialized.")
+    print("")
+    for path in result.created:
+        print(f"  Created {path}")
+    if result.skipped:
+        for path in result.skipped:
+            print(f"  Skipped {path} (already exists)")
+    print("")
+    print("Next steps:")
+    for index, step in enumerate(result.next_steps, start=1):
+        print(f"  {index}. {step}")
     return 0
 
 
@@ -195,10 +274,19 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         _fail_run(store, run, FAILURE_MAX_LOOPS, f"step {step.name} exceeded max_loops")
         return None
 
-    before = snapshot_workspace(store.workspace)
     next_loop = run.step_loops[step.name] + 1
-    request_text = render_agent_request(workflow, run, step, next_loop, protocol_warning)
+    context_present = _compute_context_present(store.workspace, workflow, step)
+    request_text = render_agent_request(
+        workflow,
+        run,
+        step,
+        next_loop,
+        protocol_warning,
+        store.workspace,
+        context_present,
+    )
     ctx = store.reserve_iteration(run, step.name, "agent", request_text=request_text, command_argv=[])
+    before = snapshot_workspace(store.workspace)
     provider = resolve_provider_for_step(config, workflow, step)
     invocation = invoke_provider(
         provider,
@@ -208,8 +296,8 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         ctx.final_path,
         child_pid_callback=_active_child_callback(store, run),
     )
-    ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-    ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
+    _persist_invocation_outputs(ctx, stdout=invocation.stdout, stderr=invocation.stderr)
+    after = snapshot_workspace(store.workspace)
 
     if invocation.unavailable:
         store.finalize_iteration(
@@ -223,6 +311,7 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
             question_count=0,
             decision_value=None,
             required_files_missing=[],
+            context_present=context_present,
         )
         _fail_run(store, run, FAILURE_PROVIDER_UNAVAILABLE, f"provider {provider.name} unavailable")
         return None
@@ -239,6 +328,7 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
             question_count=0,
             decision_value=None,
             required_files_missing=[],
+            context_present=context_present,
         )
         _fail_run(store, run, FAILURE_STEP_FAILED, f"provider step {step.name} failed")
         return None
@@ -257,6 +347,7 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
             question_count=0,
             decision_value=None,
             required_files_missing=[],
+            context_present=context_present,
         )
         if run.step_loops[step.name] >= step.max_loops:
             _fail_run(store, run, FAILURE_MAX_LOOPS, f"step {step.name} exceeded max_loops after malformed control output")
@@ -264,7 +355,6 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         store.save_run(run)
         return f"{malformed_control_warning()} ({exc})"
 
-    after = snapshot_workspace(store.workspace)
     policy_result = evaluate_policy(before, after, step.policy, store.workspace)
     if policy_result.violations:
         store.finalize_iteration(
@@ -278,6 +368,7 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
             question_count=0,
             decision_value=outcome.decision_value,
             required_files_missing=[],
+            context_present=context_present,
         )
         _fail_run(store, run, FAILURE_STEP_FAILED, "; ".join(policy_result.violations))
         return None
@@ -298,6 +389,7 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
             question_count=0,
             decision_value=outcome.decision_value,
             required_files_missing=required_missing,
+            context_present=context_present,
         )
         if run.step_loops[step.name] >= step.max_loops:
             _fail_run(store, run, FAILURE_MAX_LOOPS, f"required files missing after {step.name}")
@@ -314,6 +406,7 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         question_count=len(outcome.questions),
         decision_value=outcome.decision_value,
         required_files_missing=required_missing,
+        context_present=context_present,
     )
 
     if outcome.input_requested:
@@ -338,9 +431,9 @@ def _execute_shell_step(store, workflow, run, step) -> str | None:
     if run.step_loops[step.name] + 1 > step.max_loops:
         _fail_run(store, run, FAILURE_MAX_LOOPS, f"step {step.name} exceeded max_loops")
         return None
-    before = snapshot_workspace(store.workspace)
     command_argv = build_shell_argv(step.cmd)
     ctx = store.reserve_iteration(run, step.name, "shell", command_text=step.cmd, command_argv=command_argv)
+    before = snapshot_workspace(store.workspace)
     env = {
         "REFLOW_RUN_ID": run.run_id,
         "REFLOW_WORKFLOW": workflow.name,
@@ -355,9 +448,8 @@ def _execute_shell_step(store, workflow, run, step) -> str | None:
         env,
         child_pid_callback=_active_child_callback(store, run),
     )
-    ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-    ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
-    ctx.final_path.write_text(invocation.stdout, encoding="utf-8")
+    _persist_invocation_outputs(ctx, stdout=invocation.stdout, stderr=invocation.stderr, final=invocation.stdout)
+    after = snapshot_workspace(store.workspace)
 
     if invocation.unavailable:
         store.finalize_iteration(
@@ -376,7 +468,6 @@ def _execute_shell_step(store, workflow, run, step) -> str | None:
         _fail_run(store, run, FAILURE_INTERNAL, f"shell step {step.name} could not start")
         return None
 
-    after = snapshot_workspace(store.workspace)
     policy_result = evaluate_policy(before, after, step.policy, store.workspace)
     if policy_result.violations:
         store.finalize_iteration(
@@ -616,7 +707,8 @@ def _persist_waiting_state(store, run) -> None:
 
 def _run_with_stop_guard(store, run, action) -> int:
     try:
-        return action()
+        with _install_stop_signal_handlers():
+            return action()
     except KeyboardInterrupt:
         _terminalize_stopped_run(store, run)
         return EXIT_CODE_STOPPED
@@ -638,6 +730,41 @@ def _build_full_auto_request(workflow, run, step, questions: list[str]) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _normalize_task_for_workflow(workflow_name: str, input_mode: str, task: str | None) -> str | None:
+    normalized = task.strip() if isinstance(task, str) else None
+    if normalized == "":
+        normalized = None
+    if input_mode == "required" and normalized is None:
+        raise ValueError(
+            f"workflow '{workflow_name}' requires a task. Usage: reflow run {workflow_name} \"your task description\""
+        )
+    if input_mode == "none":
+        return None
+    return normalized
+
+
+def _compute_context_present(workspace: Path, workflow, step: AgentStep) -> dict[str, bool]:
+    return {entry.path: _context_path_exists(workspace, workflow, entry.path) for entry in step.context}
+
+
+def _context_path_exists(workspace: Path, workflow, relative_path: str) -> bool:
+    return (workspace / relative_path).exists()
+
+
+def _load_latest_context_present(store: RunStore, run) -> dict[str, bool]:
+    step_dir = store.run_dir(run.run_id) / "steps" / run.current_step
+    if not step_dir.is_dir():
+        return {}
+    for iteration_dir in sorted(step_dir.iterdir(), reverse=True):
+        meta_path = iteration_dir / "meta.json"
+        if not meta_path.is_file():
+            continue
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if isinstance(meta.get("context_present"), dict):
+            return {str(key): bool(value) for key, value in meta["context_present"].items()}
+    return {}
 
 
 def _prompt(question: str) -> str:
@@ -706,6 +833,13 @@ def _active_child_callback(store: RunStore, run):
     return callback
 
 
+def _persist_invocation_outputs(ctx, *, stdout: str, stderr: str, final: str | None = None) -> None:
+    ctx.stdout_path.write_text(stdout, encoding="utf-8")
+    ctx.stderr_path.write_text(stderr, encoding="utf-8")
+    if final is not None:
+        ctx.final_path.write_text(final, encoding="utf-8")
+
+
 def _signal_active_processes(active: dict[str, object]) -> None:
     child_pid = _safe_int(active.get("child_pid"))
     controller_pid = _safe_int(active.get("controller_pid"))
@@ -715,3 +849,20 @@ def _signal_active_processes(active: dict[str, object]) -> None:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
+
+
+@contextlib.contextmanager
+def _install_stop_signal_handlers():
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _raise_keyboard_interrupt(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)

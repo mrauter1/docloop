@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from loop_control import (
     LoopControl,
@@ -82,6 +82,11 @@ You are the planning agent for this repository.
 ## Goal
 Turn the user intent into an implementation-ready plan with milestones, interfaces, and risk controls.
 
+## Authoritative context
+- The run preamble identifies the immutable request snapshot and the authoritative chronological raw log for this run.
+- Use the original request plus any later clarification entries as the source of truth for intent.
+- Explore the repository as needed for dependency and regression analysis, but do not expand task scope unless explicitly justified.
+
 ## Required outputs
 Update `.superloop/plan/plan.md` as the single source of truth for the plan, including milestones, interface definitions, and risk register details in that one file.
 
@@ -100,7 +105,8 @@ Also append a concise entry to `.superloop/plan/feedback.md` with what changed a
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
 </loop-control>
 Legacy `<question>...</question>` remains supported for compatibility, but the canonical loop-control block is the default contract.
-9. Do not output any `<promise>...</promise>` tag.
+9. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
+10. Do not output any `<promise>...</promise>` tag.
 """,
     "implement": """# Superloop Implementer Instructions
 You are the implementation agent for this repository.
@@ -109,26 +115,30 @@ You are the implementation agent for this repository.
 Implement the approved plan and reviewer feedback with high-quality multi-file code changes.
 
 ## Working set
-- Entire repository
-- `.superloop/context.md`
+- Request snapshot and run raw log identified in the run preamble
+- Repository areas required by the current task and justified blast radius
 - `.superloop/implement/feedback.md`
 - `.superloop/plan/plan.md`
+- `.superloop/implement/implementation_notes.md`
 
 ## Rules
-1. Analyze request-relevant code paths and behavior before editing. Broaden analysis scope when justified: shared patterns may exist, dependencies are unclear, regressions could propagate across modules, or the repository/files are small enough that full analysis is simpler and safer.
-2. Apply minimal, high-signal changes; keep KISS/DRY.
-3. Resolve reviewer findings explicitly and avoid introducing unrelated refactors.
-4. When you see duplicated logic that clearly adds technical debt, centralize it into a shared abstraction/module unless that would introduce unjustified complexity.
-5. Before finalizing edits, check likely regression surfaces for touched behavior (interfaces, persisted data, compatibility, tests).
-6. Map your edits to the implementation checklist in `.superloop/plan/plan.md` when present, and note any checklist item you intentionally defer.
-7. Update `.superloop/implement/implementation_notes.md` with: files changed, checklist mapping, assumptions, expected side effects, and any deduplication/centralization decisions.
-8. Do not edit `.superloop/implement/criteria.md` (reviewer-owned).
-9. If ambiguity or intent gaps remain, or if a required change may introduce breaking behavior/regressions, ask a clarifying question with your best suggestion/supposition and do not edit files:
+1. Treat the original request plus later clarification entries as authoritative for intent. Pair artifacts may refine execution details, but they may not override explicit user intent.
+2. Analyze request-relevant code paths and behavior before editing. Broaden analysis scope when justified: shared patterns may exist, dependencies are unclear, regressions could propagate across modules, or the repository/files are small enough that full analysis is simpler and safer.
+3. Repo-wide exploration is allowed for dependency and regression analysis, but unrelated dirty files are not part of this task unless explicitly justified.
+4. Apply minimal, high-signal changes; keep KISS/DRY.
+5. Resolve reviewer findings explicitly and avoid introducing unrelated refactors.
+6. When you see duplicated logic that clearly adds technical debt, centralize it into a shared abstraction/module unless that would introduce unjustified complexity.
+7. Before finalizing edits, check likely regression surfaces for touched behavior (interfaces, persisted data, compatibility, tests).
+8. Map your edits to the implementation checklist in `.superloop/plan/plan.md` when present, and note any checklist item you intentionally defer.
+9. Update `.superloop/implement/implementation_notes.md` with: files changed, checklist mapping, assumptions, expected side effects, and any deduplication/centralization decisions.
+10. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
+11. Do not edit `.superloop/implement/criteria.md` (reviewer-owned).
+12. If ambiguity or intent gaps remain, or if a required change may introduce breaking behavior/regressions, ask a clarifying question with your best suggestion/supposition and do not edit files:
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
 </loop-control>
 Legacy `<question>...</question>` remains supported for compatibility, but the canonical loop-control block is the default contract.
-10. Do not output any `<promise>...</promise>` tag.
+13. Do not output any `<promise>...</promise>` tag.
 """,
     "test": """# Superloop Test Author Instructions
 You are the test authoring agent for this repository.
@@ -142,17 +152,20 @@ Create or refine tests and fixtures to validate changed behavior and prevent reg
 - Append a concise entry to `.superloop/test/feedback.md` summarizing test additions.
 
 ## Rules
-1. Focus on changed/request-relevant behavior first; avoid unrelated test churn. Broaden analysis when justified to find shared test patterns, dependency impacts, or when repository/files are small enough that full inspection is more reliable.
-2. Favor deterministic tests with stable setup/teardown.
-3. For each changed behavior, include happy path, edge case, and failure-path coverage where relevant.
-4. Call out flake risks (timing, network, nondeterministic ordering) and stabilization approach.
-5. Do not edit `.superloop/test/criteria.md` (auditor-owned).
-6. If blocked by missing intent, ask a clarifying question with your best suggestion/supposition and do not edit files:
+1. Treat the original request plus later clarification entries as authoritative for intent. Pair artifacts may refine execution details, but they may not override explicit user intent.
+2. Focus on changed/request-relevant behavior first; avoid unrelated test churn. Broaden analysis when justified to find shared test patterns, dependency impacts, or when repository/files are small enough that full inspection is more reliable.
+3. Repo-wide exploration is allowed for dependency and regression analysis, but unrelated dirty files are not part of this task unless explicitly justified.
+4. Favor deterministic tests with stable setup/teardown.
+5. For each changed behavior, include happy path, edge case, and failure-path coverage where relevant.
+6. Call out flake risks (timing, network, nondeterministic ordering) and stabilization approach.
+7. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
+8. Do not edit `.superloop/test/criteria.md` (auditor-owned).
+9. If blocked by missing intent, ask a clarifying question with your best suggestion/supposition and do not edit files:
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
 </loop-control>
 Legacy `<question>...</question>` remains supported for compatibility, but the canonical loop-control block is the default contract.
-7. Do not output any `<promise>...</promise>` tag.
+10. Do not output any `<promise>...</promise>` tag.
 """,
 }
 
@@ -175,12 +188,14 @@ or the same shape with `INCOMPLETE` / `BLOCKED`.
 
 ## Rules
 - You may not edit repository source code.
+- Treat the run raw log as the authoritative chronological ledger for clarifications and scope decisions. Later clarification entries override earlier assumptions for execution details.
 - Focus on request-relevant and changed-scope plan sections first; justify any out-of-scope finding. Broaden analysis when cross-cutting patterns/dependencies or small-repo economics make wider review safer.
 - A finding may be `blocking` only if it materially risks correctness, compatibility, hidden behavior changes, or implementation failure.
 - For each `blocking` finding include evidence: affected section(s), concrete failure/conflict scenario, and minimal correction direction.
 - Do not return `INCOMPLETE` if you have no blocking findings.
 - Ask a canonical `<loop-control>` question block only when missing product intent makes safe verification impossible, and include best suggestion/supposition.
 - If COMPLETE, every checkbox in criteria must be checked.
+- Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I reviewed`, `Key findings / decisions`, `Open issues / next step`.
 Legacy `<question>...</question>` and final-line `<promise>...</promise>` remain supported for compatibility, but canonical loop-control output is the default contract.
 """,
     "implement": """# Superloop Code Reviewer Instructions
@@ -201,13 +216,17 @@ or the same shape with `INCOMPLETE` / `BLOCKED`.
 
 ## Rules
 - Do not modify non-`.superloop/` code files.
+- Treat the original request plus later clarification entries as authoritative for intent.
+- Treat the run raw log as the authoritative chronological ledger for clarifications and scope decisions. Later clarification entries override earlier assumptions for execution details.
 - Review changed/request-relevant scope first; justify any out-of-scope finding. Broaden analysis when shared patterns, uncertain dependencies, or small-repo economics justify wider inspection.
+- Repo-wide exploration is allowed for dependency and regression analysis, but unrelated dirty files are not part of this task unless explicitly justified.
 - A finding may be `blocking` only if it materially risks correctness, security, reliability, compatibility, required behavior coverage, or introduces avoidable duplicated logic that increases technical debt.
 - Flag duplicated logic that should be centralized for DRY/KISS as a finding; treat it as `blocking` when duplication is substantial and likely to increase maintenance or inconsistency risk.
 - Each `blocking` finding must include: file/symbol reference, concrete failure or regression (or maintainability debt) scenario, and minimal fix direction including centralization target when applicable.
 - Do not return `INCOMPLETE` if you have no blocking findings.
 - Ask a canonical `<loop-control>` question block only for missing product intent, and include best suggestion/supposition.
 - If COMPLETE, criteria must have no unchecked boxes.
+- Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I reviewed`, `Key findings / decisions`, `Open issues / next step`.
 Legacy `<question>...</question>` and final-line `<promise>...</promise>` remain supported for compatibility, but canonical loop-control output is the default contract.
 """,
     "test": """# Superloop Test Auditor Instructions
@@ -228,13 +247,17 @@ or the same shape with `INCOMPLETE` / `BLOCKED`.
 
 ## Rules
 - Do not edit repository code except `.superloop/test/*` audit artifacts.
+- Treat the original request plus later clarification entries as authoritative for intent.
+- Treat the run raw log as the authoritative chronological ledger for clarifications and scope decisions. Later clarification entries override earlier assumptions for execution details.
 - Focus on changed/request-relevant behavior first; justify any out-of-scope finding. Broaden analysis when shared patterns, uncertain dependencies, or small-repo economics justify wider inspection.
+- Repo-wide exploration is allowed for dependency and regression analysis, but unrelated dirty files are not part of this task unless explicitly justified.
 - A finding may be `blocking` only if it materially risks regression detection, correctness coverage, or test reliability.
 - Each `blocking` finding must include evidence: affected behavior/tests, concrete missed-regression scenario, and minimal correction direction.
 - Low-confidence concerns should be non-blocking suggestions.
 - Do not return `INCOMPLETE` if you have no blocking findings.
 - Ask a canonical `<loop-control>` question block only for missing product intent, and include best suggestion/supposition.
 - If COMPLETE, criteria must have no unchecked boxes.
+- Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I reviewed`, `Key findings / decisions`, `Open issues / next step`.
 Legacy `<question>...</question>` and final-line `<promise>...</promise>` remain supported for compatibility, but canonical loop-control output is the default contract.
 """,
 }
@@ -245,6 +268,21 @@ class PairConfig:
     name: str
     enabled: bool
     max_iterations: int
+
+
+@dataclass(frozen=True)
+class CodexCommandConfig:
+    start_command: List[str]
+    resume_command: List[str]
+
+
+@dataclass
+class SessionState:
+    mode: str
+    thread_id: Optional[str]
+    pending_clarification_note: Optional[str]
+    created_at: str
+    last_used_at: Optional[str] = None
 
 
 @dataclass
@@ -379,7 +417,6 @@ def verifier_scope_violations(pair: str, verifier_delta: Set[str], task_root: st
 def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[str]:
     """Returns paths that Superloop may stage/commit."""
     shared_paths = [
-        f"{task_root}/context.md",
         f"{task_root}/task.json",
         f"{task_root}/run_log.md",
         f"{task_root}/raw_phase_log.md",
@@ -390,6 +427,137 @@ def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[
     else:
         pair_paths = [f"{task_root}/{pair}/"]
     return [*shared_paths, *pair_paths]
+
+
+DEFAULT_REQUEST_TEXT = "No explicit initial request was provided for this run. Use repository artifacts and explicit clarifications only."
+
+
+def _normalize_request_text(text: Optional[str]) -> Optional[str]:
+    if text is None:
+        return None
+    normalized = text.strip()
+    return normalized or None
+
+
+def _extract_request_from_legacy_context(context_file: Path) -> Optional[str]:
+    if not context_file.exists():
+        return None
+    text = context_file.read_text(encoding="utf-8").strip()
+    if not text:
+        return None
+    text = re.split(r"\n### Clarification\b", text, maxsplit=1)[0].strip()
+    if text.startswith("# Product Context"):
+        text = text[len("# Product Context"):].strip()
+    return text or None
+
+
+def _load_task_meta(task_meta_file: Path, task_id: str) -> Dict[str, Any]:
+    if task_meta_file.exists():
+        try:
+            payload = json.loads(task_meta_file.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "task_id": task_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _write_task_meta(task_meta_file: Path, payload: Dict[str, Any]):
+    task_meta_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def task_request_text(task_meta_file: Path, legacy_context_file: Optional[Path] = None) -> Optional[str]:
+    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
+    request_text = _normalize_request_text(payload.get("request_text") if isinstance(payload.get("request_text"), str) else None)
+    if request_text:
+        return request_text
+    if legacy_context_file is not None:
+        return _extract_request_from_legacy_context(legacy_context_file)
+    return None
+
+
+def write_request_snapshot(request_file: Path, request_text: Optional[str]):
+    if request_file.exists():
+        return
+    body = _normalize_request_text(request_text) or DEFAULT_REQUEST_TEXT
+    request_file.write_text(body.rstrip() + "\n", encoding="utf-8")
+
+
+def reconstruct_legacy_request_snapshot(request_file: Path, legacy_context_file: Path) -> str:
+    stamp = datetime.now(timezone.utc).isoformat()
+    legacy_request = _extract_request_from_legacy_context(legacy_context_file)
+    if legacy_request:
+        request_file.write_text(
+            (
+                f"[Legacy request snapshot reconstructed on {stamp} from {legacy_context_file}. "
+                "The original run-scoped request.md was missing, so this may not exactly match the original run-start request.]\n\n"
+                f"{legacy_request.rstrip()}\n"
+            ),
+            encoding="utf-8",
+        )
+        return "Legacy run request snapshot was reconstructed from the legacy task context because request.md was missing."
+    request_file.write_text(
+        (
+            f"[Original run-start request unavailable. This legacy run predates immutable request snapshots. "
+            f"Reconstructed placeholder written on {stamp}.]\n"
+        ),
+        encoding="utf-8",
+    )
+    return "Legacy run request snapshot was unavailable; resuming with a placeholder request snapshot."
+
+
+def append_runtime_notice(
+    task_run_log: Path,
+    run_run_log: Path,
+    task_raw_phase_log: Path,
+    run_raw_phase_log: Path,
+    run_id: str,
+    message: str,
+    *,
+    entry: str,
+):
+    append_run_log(task_run_log, message, run_id=run_id)
+    append_run_log(run_run_log, message, run_id=run_id)
+    append_runtime_raw_log(task_raw_phase_log, run_id, entry, message)
+    append_runtime_raw_log(run_raw_phase_log, run_id, entry, message)
+
+
+def load_session_state(session_file: Path, default_mode: str) -> SessionState:
+    if session_file.exists():
+        try:
+            payload = json.loads(session_file.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return SessionState(
+                    mode=str(payload.get("mode") or default_mode),
+                    thread_id=payload.get("thread_id") if isinstance(payload.get("thread_id"), str) else None,
+                    pending_clarification_note=payload.get("pending_clarification_note")
+                    if isinstance(payload.get("pending_clarification_note"), str)
+                    else None,
+                    created_at=str(payload.get("created_at") or datetime.now(timezone.utc).isoformat()),
+                    last_used_at=payload.get("last_used_at") if isinstance(payload.get("last_used_at"), str) else None,
+                )
+        except (json.JSONDecodeError, OSError):
+            pass
+    return SessionState(
+        mode=default_mode,
+        thread_id=None,
+        pending_clarification_note=None,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def save_session_state(session_file: Path, state: SessionState):
+    payload = {
+        "mode": state.mode,
+        "thread_id": state.thread_id,
+        "pending_clarification_note": state.pending_clarification_note,
+        "created_at": state.created_at,
+        "last_used_at": state.last_used_at,
+    }
+    session_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def has_git_repo(root: Path) -> bool:
@@ -454,7 +622,7 @@ def check_dependencies(require_git: bool = True):
         fatal(f"[!] FATAL: Missing required dependencies: {', '.join(missing)}")
 
 
-def resolve_codex_exec_command(model: str) -> List[str]:
+def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
     help_result = subprocess.run(
         ["codex", "exec", "--help"],
         capture_output=True,
@@ -468,30 +636,65 @@ def resolve_codex_exec_command(model: str) -> List[str]:
     help_text = f"{help_result.stdout}\n{help_result.stderr}"
     supports_bypass = "--dangerously-bypass-approvals-and-sandbox" in help_text
     supports_full_auto = "--full-auto" in help_text
+    supports_json = "--json" in help_text
+    resume_help = subprocess.run(
+        ["codex", "exec", "resume", "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if resume_help.returncode != 0:
+        details = resume_help.stderr.strip() or resume_help.stdout.strip() or "Unable to inspect `codex exec resume --help`."
+        fatal(f"[!] FATAL CODEX ERROR: {details}")
+    resume_text = f"{resume_help.stdout}\n{resume_help.stderr}"
+    supports_resume_json = "--json" in resume_text
+
+    if not supports_json or not supports_resume_json:
+        fatal("[!] FATAL CODEX ERROR: This Superloop version requires `codex exec` and `codex exec resume` support for --json.")
 
     if supports_bypass:
-        return [
-            "codex",
-            "-c",
-            'model_providers.experimental_ws.wire_api="responses"',
-            "exec",
-            "--ephemeral",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--model",
-            model,
-            "-",
-        ]
+        return CodexCommandConfig(
+            start_command=[
+                "codex",
+                "exec",
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                model,
+                "-",
+            ],
+            resume_command=[
+                "codex",
+                "exec",
+                "resume",
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                model,
+            ],
+        )
 
     if supports_full_auto:
-        return [
-            "codex",
-            "exec",
-            "--ephemeral",
-            "--full-auto",
-            "--model",
-            model,
-            "-",
-        ]
+        return CodexCommandConfig(
+            start_command=[
+                "codex",
+                "exec",
+                "--json",
+                "--full-auto",
+                "--model",
+                model,
+                "-",
+            ],
+            resume_command=[
+                "codex",
+                "exec",
+                "resume",
+                "--json",
+                "--full-auto",
+                "--model",
+                model,
+            ],
+        )
 
     fatal(
         "[!] FATAL CODEX ERROR: This Superloop version requires `codex exec` support for "
@@ -524,13 +727,20 @@ def parse_pairs(pairs_arg: str, max_iterations: int) -> List[PairConfig]:
 def slugify_task(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     slug = re.sub(r"-+", "-", slug)
-    return slug[:48] or "task"
+    return slug or "task"
 
 
 def derive_intent_task_id(intent: str) -> str:
-    slug = slugify_task(intent)
+    slug = _truncate_slug(slugify_task(intent), 48)
     digest = hashlib.sha1(intent.encode("utf-8")).hexdigest()[:8]
     return f"{slug}-{digest}"
+
+
+def _truncate_slug(slug: str, max_length: int) -> str:
+    if len(slug) <= max_length:
+        return slug or "task"
+    truncated = slug[:max_length].rstrip("-")
+    return truncated or "task"
 
 
 def render_task_prompt(template: str, task_root_rel: str) -> str:
@@ -553,22 +763,6 @@ def ensure_workspace(
     task_dir.mkdir(parents=True, exist_ok=True)
     task_root_rel = repo_relative_path(root, task_dir)
 
-    context_file = task_dir / "context.md"
-    if not context_file.exists():
-        starter = "# Product Context\n\n"
-        if product_intent:
-            starter += f"{product_intent.strip()}\n"
-        else:
-            starter += "Add business goals, constraints, and non-negotiable requirements here.\n"
-        context_file.write_text(starter, encoding="utf-8")
-    elif product_intent:
-        if intent_mode == "replace":
-            context_file.write_text(f"# Product Context\n\n{product_intent.strip()}\n", encoding="utf-8")
-        elif intent_mode == "append":
-            stamp = datetime.now(timezone.utc).isoformat()
-            with context_file.open("a", encoding="utf-8") as f:
-                f.write(f"\n\n## Run Intent ({stamp})\n{product_intent.strip()}\n")
-
     run_log = task_dir / "run_log.md"
     if not run_log.exists():
         run_log.write_text("# Superloop Run Log\n", encoding="utf-8")
@@ -581,18 +775,25 @@ def ensure_workspace(
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     task_meta_file = task_dir / "task.json"
-    if not task_meta_file.exists():
-        task_meta_file.write_text(
-            json.dumps(
-                {
-                    "task_id": task_id,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+    legacy_context_file = task_dir / "context.md"
+    task_meta = _load_task_meta(task_meta_file, task_id)
+    existing_request = _normalize_request_text(task_meta.get("request_text") if isinstance(task_meta.get("request_text"), str) else None)
+    if existing_request is None:
+        existing_request = _extract_request_from_legacy_context(legacy_context_file)
+
+    normalized_intent = _normalize_request_text(product_intent)
+    if normalized_intent is not None:
+        if intent_mode == "replace" or existing_request is None:
+            existing_request = normalized_intent
+        elif intent_mode == "append":
+            stamp = datetime.now(timezone.utc).isoformat()
+            existing_request = f"{existing_request}\n\n## Run Intent ({stamp})\n{normalized_intent}"
+        elif intent_mode == "preserve" and existing_request is None:
+            existing_request = normalized_intent
+    task_meta["request_text"] = existing_request
+    if normalized_intent is not None or "request_updated_at" not in task_meta:
+        task_meta["request_updated_at"] = datetime.now(timezone.utc).isoformat()
+    _write_task_meta(task_meta_file, task_meta)
 
     pair_dirs: Dict[str, Path] = {}
     for pair in PAIR_ORDER:
@@ -629,9 +830,9 @@ def ensure_workspace(
         "task_root_rel": Path(task_root_rel),
         "task_id": task_id,
         "runs_dir": runs_dir,
-        "context_file": context_file,
         "run_log": run_log,
         "raw_phase_log": raw_phase_log,
+        "legacy_context_file": legacy_context_file,
         **{f"pair_{k}": v for k, v in pair_dirs.items()},
     }
 
@@ -641,7 +842,7 @@ def create_run_id() -> str:
     return f"run-{timestamp}-{uuid4().hex[:8]}"
 
 
-def create_run_paths(runs_dir: Path, run_id: str) -> Dict[str, Path]:
+def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], session_mode: str = "persistent") -> Dict[str, Path]:
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -655,6 +856,10 @@ def create_run_paths(runs_dir: Path, run_id: str) -> Dict[str, Path]:
     events_file.write_text("", encoding="utf-8")
 
     summary_file = run_dir / "summary.md"
+    request_file = run_dir / "request.md"
+    session_file = run_dir / "session.json"
+    write_request_snapshot(request_file, request_text)
+    save_session_state(session_file, load_session_state(session_file, session_mode))
 
     return {
         "run_dir": run_dir,
@@ -662,10 +867,15 @@ def create_run_paths(runs_dir: Path, run_id: str) -> Dict[str, Path]:
         "raw_phase_log": raw_phase_log,
         "events_file": events_file,
         "summary_file": summary_file,
+        "request_file": request_file,
+        "session_file": session_file,
     }
 
 
-def open_existing_run_paths(runs_dir: Path, run_id: str) -> Dict[str, Path]:
+def open_existing_run_paths(
+    runs_dir: Path,
+    run_id: str,
+) -> Dict[str, Path]:
     run_dir = runs_dir / run_id
     if not run_dir.exists() or not run_dir.is_dir():
         fatal(f"[!] FATAL: run_id not found under task runs/: {run_id}")
@@ -674,6 +884,8 @@ def open_existing_run_paths(runs_dir: Path, run_id: str) -> Dict[str, Path]:
     raw_phase_log = run_dir / "raw_phase_log.md"
     events_file = run_dir / "events.jsonl"
     summary_file = run_dir / "summary.md"
+    request_file = run_dir / "request.md"
+    session_file = run_dir / "session.json"
 
     if not run_log.exists():
         run_log.write_text(f"# Superloop Run Log ({run_id})\n", encoding="utf-8")
@@ -688,69 +900,20 @@ def open_existing_run_paths(runs_dir: Path, run_id: str) -> Dict[str, Path]:
         "raw_phase_log": raw_phase_log,
         "events_file": events_file,
         "summary_file": summary_file,
+        "request_file": request_file,
+        "session_file": session_file,
     }
 
 
-def run_codex_phase(
-    codex_command: List[str],
-    cwd: Path,
-    prompt_file: Path,
-    phase_name: str,
-    pair_name: str,
-    cycle_num: int,
-    attempt_num: int,
-    run_id: str,
-    run_raw_phase_log: Path,
-    raw_phase_log: Path,
-) -> str:
-    base_instructions = prompt_file.read_text(encoding="utf-8")
-    prompt_payload = (
-        f"REPOSITORY ROOT: {cwd}\n"
-        f"LOOP PAIR: {pair_name}\n"
-        "Follow the prompt rules exactly.\n\n"
-        f"{base_instructions}"
-    )
-
-    print(f"[*] Spawning {pair_name}:{phase_name} agent...")
-    process = subprocess.run(
-        codex_command,
-        cwd=cwd,
-        input=prompt_payload,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=sys.stderr,
-        encoding="utf-8",
-    )
-
-    stdout = process.stdout or ""
-    append_raw_phase_log(
-        raw_phase_log,
-        pair_name,
-        phase_name,
-        cycle_num,
-        attempt_num,
-        "codex-agent",
-        stdout,
-        run_id=run_id,
-    )
-    append_raw_phase_log(
-        run_raw_phase_log,
-        pair_name,
-        phase_name,
-        cycle_num,
-        attempt_num,
-        "codex-agent",
-        stdout,
-        run_id=run_id,
-    )
-
-    if process.returncode != 0:
-        if stdout.strip():
-            print(stdout.rstrip(), file=sys.stderr)
-        fatal(f"\n[!] Codex CLI failed during {pair_name}:{phase_name} with exit code {process.returncode}.")
-    return stdout
-
-
+def append_raw_log_entry(raw_phase_log: Path, body: str, **fields: Optional[object]):
+    header = " | ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+    with raw_phase_log.open("a", encoding="utf-8") as f:
+        f.write("\n\n---\n")
+        f.write(f"{header}\n")
+        f.write("---\n")
+        f.write(body if body else "[empty stdout]\n")
+        if not body.endswith("\n"):
+            f.write("\n")
 
 
 def append_raw_phase_log(
@@ -762,14 +925,265 @@ def append_raw_phase_log(
     process_name: str,
     stdout: str,
     run_id: str,
+    thread_id: Optional[str] = None,
 ):
-    with raw_phase_log.open("a", encoding="utf-8") as f:
-        f.write(
-            "\n\n---\n"
-            f"run_id={run_id} | pair={pair} | phase={phase} | process={process_name} | cycle={cycle} | attempt={attempt}\n"
-            "---\n"
+    append_raw_log_entry(
+        raw_phase_log,
+        stdout if stdout else "[empty stdout]\n",
+        run_id=run_id,
+        entry="phase_output",
+        pair=pair,
+        phase=phase,
+        process=process_name,
+        cycle=cycle,
+        attempt=attempt,
+        thread_id=thread_id,
+    )
+
+
+def append_runtime_raw_log(
+    raw_phase_log: Path,
+    run_id: str,
+    entry: str,
+    body: str,
+    *,
+    pair: Optional[str] = None,
+    phase: Optional[str] = None,
+    cycle: Optional[int] = None,
+    attempt: Optional[int] = None,
+    thread_id: Optional[str] = None,
+    source: Optional[str] = None,
+):
+    append_raw_log_entry(
+        raw_phase_log,
+        body,
+        run_id=run_id,
+        entry=entry,
+        pair=pair,
+        phase=phase,
+        cycle=cycle,
+        attempt=attempt,
+        thread_id=thread_id,
+        source=source,
+    )
+
+
+def parse_codex_exec_json(raw_output: str) -> Tuple[str, Optional[str]]:
+    messages: List[str] = []
+    thread_id: Optional[str] = None
+    for line in raw_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+            thread_id = event["thread_id"]
+            continue
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            messages.append(item["text"])
+    return "\n\n".join(part.strip() for part in messages if part and part.strip()), thread_id
+
+
+def build_phase_prompt(
+    *,
+    cwd: Path,
+    prompt_file: Path,
+    request_file: Path,
+    run_raw_phase_log: Path,
+    pair_name: str,
+    phase_name: str,
+    cycle_num: int,
+    attempt_num: int,
+    run_id: str,
+    session_state: SessionState,
+    include_request_snapshot: bool,
+) -> str:
+    base_instructions = prompt_file.read_text(encoding="utf-8")
+    request_text = request_file.read_text(encoding="utf-8").strip()
+    preamble = [
+        f"REPOSITORY ROOT: {cwd}",
+        f"RUN ID: {run_id}",
+        f"LOOP PAIR: {pair_name}",
+        f"PHASE ROLE: {phase_name}",
+        f"CYCLE: {cycle_num}",
+        f"ATTEMPT: {attempt_num}",
+        f"IMMUTABLE REQUEST FILE: {request_file}",
+        f"AUTHORITATIVE RAW LOG: {run_raw_phase_log}",
+        "AUTHORITY ORDER FOR THIS TURN:",
+        "1. Explicit clarification entries already appended to the authoritative raw log.",
+        "2. The immutable initial request snapshot.",
+        "3. Pair artifacts produced by earlier phases.",
+        "4. Earlier conversation memory.",
+        "Only explicit clarification entries may change user intent.",
+        "Use repo-wide exploration only for dependency and regression analysis; do not absorb unrelated dirty files into scope unless explicitly justified.",
+    ]
+    if session_state.thread_id:
+        preamble.append(f"RESUMED THREAD ID: {session_state.thread_id}")
+    else:
+        preamble.append("THREAD STATUS: new thread starts on this turn.")
+    if session_state.pending_clarification_note:
+        preamble.extend(
+            [
+                "",
+                "MOST RECENT CLARIFICATION TO APPLY IMMEDIATELY:",
+                session_state.pending_clarification_note,
+            ]
         )
-        f.write(stdout if stdout else "[empty stdout]\n")
+    if include_request_snapshot:
+        preamble.extend(
+            [
+                "",
+                "INITIAL REQUEST SNAPSHOT:",
+                request_text if request_text else DEFAULT_REQUEST_TEXT,
+            ]
+        )
+    return "\n".join(preamble) + "\n\nFollow the prompt rules exactly.\n\n" + base_instructions
+
+
+def run_codex_phase(
+    codex_command: CodexCommandConfig,
+    cwd: Path,
+    prompt_file: Path,
+    phase_name: str,
+    pair_name: str,
+    cycle_num: int,
+    attempt_num: int,
+    run_id: str,
+    request_file: Path,
+    session_file: Path,
+    run_raw_phase_log: Path,
+    raw_phase_log: Path,
+) -> str:
+    session_state = load_session_state(session_file, "persistent")
+    session_state.mode = "persistent"
+    include_request_snapshot = session_state.thread_id is None
+    prompt_payload = build_phase_prompt(
+        cwd=cwd,
+        prompt_file=prompt_file,
+        request_file=request_file,
+        run_raw_phase_log=run_raw_phase_log,
+        pair_name=pair_name,
+        phase_name=phase_name,
+        cycle_num=cycle_num,
+        attempt_num=attempt_num,
+        run_id=run_id,
+        session_state=session_state,
+        include_request_snapshot=include_request_snapshot,
+    )
+
+    if session_state.thread_id:
+        command = [*codex_command.resume_command, session_state.thread_id, "-"]
+        command_mode = "resume"
+    else:
+        command = list(codex_command.start_command)
+        command_mode = "start"
+
+    print(f"[*] Spawning {pair_name}:{phase_name} agent...")
+    process = subprocess.run(
+        command,
+        cwd=cwd,
+        input=prompt_payload,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=sys.stderr,
+        encoding="utf-8",
+    )
+
+    raw_exec_output = process.stdout or ""
+    stdout, thread_id = parse_codex_exec_json(raw_exec_output)
+    session_state.thread_id = thread_id or session_state.thread_id
+    session_state.last_used_at = datetime.now(timezone.utc).isoformat()
+    if process.returncode == 0:
+        session_state.pending_clarification_note = None
+    save_session_state(session_file, session_state)
+
+    append_runtime_raw_log(
+        raw_phase_log,
+        run_id,
+        "session_turn",
+        f"mode={command_mode}\nprompt_file={prompt_file}",
+        pair=pair_name,
+        phase=phase_name,
+        cycle=cycle_num,
+        attempt=attempt_num,
+        thread_id=session_state.thread_id,
+    )
+    append_runtime_raw_log(
+        run_raw_phase_log,
+        run_id,
+        "session_turn",
+        f"mode={command_mode}\nprompt_file={prompt_file}",
+        pair=pair_name,
+        phase=phase_name,
+        cycle=cycle_num,
+        attempt=attempt_num,
+        thread_id=session_state.thread_id,
+    )
+
+    append_raw_phase_log(
+        raw_phase_log,
+        pair_name,
+        phase_name,
+        cycle_num,
+        attempt_num,
+        "codex-agent",
+        stdout,
+        run_id=run_id,
+        thread_id=session_state.thread_id,
+    )
+    append_raw_phase_log(
+        run_raw_phase_log,
+        pair_name,
+        phase_name,
+        cycle_num,
+        attempt_num,
+        "codex-agent",
+        stdout,
+        run_id=run_id,
+        thread_id=session_state.thread_id,
+    )
+
+    if process.returncode == 0 and command_mode == "start" and not thread_id:
+        warning_message = (
+            f"Codex CLI did not return a thread id during {pair_name}:{phase_name}; "
+            "future phases will start a new conversation unless one becomes available."
+        )
+        warn(warning_message)
+        append_runtime_raw_log(
+            raw_phase_log,
+            run_id,
+            "session_warning",
+            warning_message,
+            pair=pair_name,
+            phase=phase_name,
+            cycle=cycle_num,
+            attempt=attempt_num,
+        )
+        append_runtime_raw_log(
+            run_raw_phase_log,
+            run_id,
+            "session_warning",
+            warning_message,
+            pair=pair_name,
+            phase=phase_name,
+            cycle=cycle_num,
+            attempt=attempt_num,
+        )
+
+    if process.returncode != 0:
+        diagnostic = stdout.strip() or raw_exec_output.strip()
+        if diagnostic:
+            print(diagnostic.rstrip(), file=sys.stderr)
+        fatal(f"\n[!] Codex CLI failed during {pair_name}:{phase_name} with exit code {process.returncode}.")
+    return stdout
 
 @dataclass(frozen=True)
 class PhaseControlDecision:
@@ -841,18 +1255,20 @@ def ask_human(question_text: str) -> str:
         print("Please provide an answer, or type 'skip'.")
 
 
-def auto_answer_question(codex_command: List[str], root: Path, context_file: Path, question: str) -> str:
-    context = context_file.read_text(encoding="utf-8")
+def auto_answer_question(codex_command: CodexCommandConfig, root: Path, request_file: Path, raw_phase_log: Path, question: str) -> str:
+    request_text = request_file.read_text(encoding="utf-8").strip()
     prompt = (
         "You are assisting a superloop orchestrator.\n"
         "Answer the question using repository context and existing requirements.\n"
         "If uncertain, provide the safest explicit assumption.\n"
+        f"The immutable request snapshot is at {request_file}.\n"
+        f"The authoritative chronological raw log is at {raw_phase_log}.\n"
         "Return plain text only.\n\n"
         f"Question:\n{question}\n\n"
-        f"Context:\n{context}\n"
+        f"Request snapshot:\n{request_text if request_text else DEFAULT_REQUEST_TEXT}\n"
     )
     process = subprocess.run(
-        codex_command,
+        codex_command.start_command,
         cwd=root,
         input=prompt,
         text=True,
@@ -862,17 +1278,54 @@ def auto_answer_question(codex_command: List[str], root: Path, context_file: Pat
     )
     if process.returncode != 0:
         fatal(f"[!] Auto-answer pass failed with exit code {process.returncode}.")
-    answer = (process.stdout or "").strip()
+    answer, _thread_id = parse_codex_exec_json(process.stdout or "")
+    answer = answer.strip()
     if not answer:
         return "[Auto-answer failed to produce content]"
     return answer
 
 
-def append_clarification(context_file: Path, pair: str, phase: str, cycle: int, question: str, answer: str):
-    with context_file.open("a", encoding="utf-8") as f:
-        f.write(f"\n\n### Clarification ({pair}, cycle {cycle}, {phase})\n")
-        f.write(f"**Q:** {question}\n")
-        f.write(f"**A:** {answer}\n")
+def append_clarification(
+    run_raw_phase_log: Path,
+    task_raw_phase_log: Path,
+    session_file: Path,
+    pair: str,
+    phase: str,
+    cycle: int,
+    attempt: int,
+    question: str,
+    answer: str,
+    run_id: str,
+    source: str,
+) -> str:
+    note = f"Question:\n{question}\n\nAnswer:\n{answer}"
+    body = f"{note}\n"
+    append_runtime_raw_log(
+        task_raw_phase_log,
+        run_id,
+        "clarification",
+        body,
+        pair=pair,
+        phase=phase,
+        cycle=cycle,
+        attempt=attempt,
+        source=source,
+    )
+    append_runtime_raw_log(
+        run_raw_phase_log,
+        run_id,
+        "clarification",
+        body,
+        pair=pair,
+        phase=phase,
+        cycle=cycle,
+        attempt=attempt,
+        source=source,
+    )
+    session_state = load_session_state(session_file, "persistent")
+    session_state.pending_clarification_note = note
+    save_session_state(session_file, session_state)
+    return note
 
 
 def append_run_log(
@@ -1197,7 +1650,9 @@ def main() -> int:
     paths = ensure_workspace(root, task_id, args.intent, args.intent_mode)
     task_root_rel = str(paths["task_root_rel"])
     task_scoped_paths = tracked_superloop_paths(task_root_rel)
+    resolved_request_text = task_request_text(paths["task_meta_file"], paths["legacy_context_file"])
     resume_checkpoint: Optional[ResumeCheckpoint] = None
+    session_state: Optional[SessionState] = None
     if args.resume:
         run_id = args.run_id or latest_run_id(paths["runs_dir"])
         if not run_id:
@@ -1206,13 +1661,53 @@ def main() -> int:
         terminal_status = latest_run_status(run_paths["events_file"])
         if terminal_status in {"success", "blocked", "failed", "fatal_error", "interrupted"}:
             fatal(f"[!] FATAL: Refusing to resume terminal run {run_id} (status={terminal_status}).")
+        if not run_paths["request_file"].exists():
+            request_notice = reconstruct_legacy_request_snapshot(
+                run_paths["request_file"],
+                paths["legacy_context_file"],
+            )
+            warn(request_notice)
+            append_runtime_notice(
+                paths["run_log"],
+                run_paths["run_log"],
+                paths["raw_phase_log"],
+                run_paths["raw_phase_log"],
+                run_id,
+                request_notice,
+                entry="request_recovery",
+            )
         enabled_pairs = [p.name for p in pair_configs if p.enabled]
         resume_checkpoint = load_resume_checkpoint(run_paths["events_file"], enabled_pairs)
         recorder = EventRecorder(run_id=run_id, events_file=run_paths["events_file"], sequence=resume_checkpoint.last_sequence)
+        if run_paths["session_file"].exists():
+            session_state = load_session_state(run_paths["session_file"], "persistent")
+            session_state.mode = "persistent"
+        else:
+            session_state = SessionState(
+                mode="persistent",
+                thread_id=None,
+                pending_clarification_note=None,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            save_session_state(run_paths["session_file"], session_state)
+        if not session_state.thread_id:
+            session_notice = "No stored Codex thread id is available; resuming with a new conversation for the next phase."
+            warn(session_notice)
+            append_runtime_notice(
+                paths["run_log"],
+                run_paths["run_log"],
+                paths["raw_phase_log"],
+                run_paths["raw_phase_log"],
+                run_id,
+                session_notice,
+                entry="session_recovery",
+            )
+            save_session_state(run_paths["session_file"], session_state)
     else:
         run_id = create_run_id()
-        run_paths = create_run_paths(paths["runs_dir"], run_id)
+        run_paths = create_run_paths(paths["runs_dir"], run_id, resolved_request_text, session_mode="persistent")
         recorder = EventRecorder(run_id=run_id, events_file=run_paths["events_file"])
+        session_state = load_session_state(run_paths["session_file"], "persistent")
     run_status = "running"
 
     if use_git and not args.resume:
@@ -1234,6 +1729,30 @@ def main() -> int:
         use_git=use_git,
         task_id=task_id,
         task_root=task_root_rel,
+    )
+    append_runtime_raw_log(
+        paths["raw_phase_log"],
+        run_id,
+        "run_state",
+        (
+            f"workspace={root}\n"
+            f"pairs={','.join([p.name for p in pair_configs if p.enabled])}\n"
+            f"request_file={run_paths['request_file']}\n"
+            f"session_mode={session_state.mode if session_state else 'persistent'}"
+        ),
+        thread_id=session_state.thread_id if session_state else None,
+    )
+    append_runtime_raw_log(
+        run_paths["raw_phase_log"],
+        run_id,
+        "run_state",
+        (
+            f"workspace={root}\n"
+            f"pairs={','.join([p.name for p in pair_configs if p.enabled])}\n"
+            f"request_file={run_paths['request_file']}\n"
+            f"session_mode={session_state.mode if session_state else 'persistent'}"
+        ),
+        thread_id=session_state.thread_id if session_state else None,
     )
 
     try:
@@ -1285,6 +1804,8 @@ def main() -> int:
                     cycle_num,
                     attempt_num,
                     run_id,
+                    run_paths["request_file"],
+                    run_paths["session_file"],
                     run_paths["raw_phase_log"],
                     paths["raw_phase_log"],
                 )
@@ -1307,11 +1828,25 @@ def main() -> int:
                     recorder.emit("question", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
                     producer_question = format_question(producer_control)
                     if args.full_auto_answers:
-                        answer = auto_answer_question(codex_command, root, paths["context_file"], producer_question)
+                        answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], producer_question)
                         print(f"[+] Auto-answered producer question: {answer}")
+                        answer_source = "auto"
                     else:
                         answer = ask_human(producer_question)
-                    append_clarification(paths["context_file"], pair, "producer", cycle_num, producer_question, answer)
+                        answer_source = "human"
+                    append_clarification(
+                        run_paths["raw_phase_log"],
+                        paths["raw_phase_log"],
+                        run_paths["session_file"],
+                        pair,
+                        "producer",
+                        cycle_num,
+                        attempt_num,
+                        producer_question,
+                        answer,
+                        run_id,
+                        answer_source,
+                    )
                     if use_git:
                         commit_tracked_changes(root, f"superloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
                     continue
@@ -1340,6 +1875,8 @@ def main() -> int:
                     cycle_num,
                     attempt_num,
                     run_id,
+                    run_paths["request_file"],
+                    run_paths["session_file"],
                     run_paths["raw_phase_log"],
                     paths["raw_phase_log"],
                 )
@@ -1365,11 +1902,25 @@ def main() -> int:
                     recorder.emit("question", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
                     verifier_question = format_question(verifier_control)
                     if args.full_auto_answers:
-                        answer = auto_answer_question(codex_command, root, paths["context_file"], verifier_question)
+                        answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], verifier_question)
                         print(f"[+] Auto-answered verifier question: {answer}")
+                        answer_source = "auto"
                     else:
                         answer = ask_human(verifier_question)
-                    append_clarification(paths["context_file"], pair, "verifier", cycle_num, verifier_question, answer)
+                        answer_source = "human"
+                    append_clarification(
+                        run_paths["raw_phase_log"],
+                        paths["raw_phase_log"],
+                        run_paths["session_file"],
+                        pair,
+                        "verifier",
+                        cycle_num,
+                        attempt_num,
+                        verifier_question,
+                        answer,
+                        run_id,
+                        answer_source,
+                    )
                     if use_git:
                         commit_tracked_changes(root, f"superloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
                     continue

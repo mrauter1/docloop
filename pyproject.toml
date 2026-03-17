@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docloop-tools"
+version = "0.1.0"
+description = "DocLoop, Superloop, and Reflow Codex orchestration tools"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML",
+]
+
+[project.scripts]
+docloop = "docloop:main"
+superloop = "superloop:main"
+reflow = "reflow:main"
+
+[tool.setuptools]
+py-modules = ["docloop", "superloop", "reflow", "loop_control"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["reflow_runtime*"]
+
+[tool.setuptools.package-data]
+reflow_runtime = ["templates/**/*"]

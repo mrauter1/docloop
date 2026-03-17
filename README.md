@@ -288,8 +288,12 @@ python3 -m pip install -r requirements.txt
 ### Usage
 
 ```bash
-python3 reflow.py run <workflow> --workspace /path/to/workspace
+python3 reflow.py init <workflow> --workspace /path/to/workspace
+python3 reflow.py validate <workflow> --workspace /path/to/workspace
+python3 reflow.py run <workflow> "task text" --workspace /path/to/workspace
+python3 reflow.py run <workflow> --task-file /path/to/task.txt --workspace /path/to/workspace
 python3 reflow.py status <run_id> --workspace /path/to/workspace
+python3 reflow.py status <run_id> --verbose --workspace /path/to/workspace
 python3 reflow.py list --workspace /path/to/workspace
 python3 reflow.py reply <run_id> --workspace /path/to/workspace
 python3 reflow.py stop <run_id> --workspace /path/to/workspace
@@ -306,3 +310,10 @@ The workspace must contain:
 ```
 
 Per-run state, history, operator inputs, and iteration artifacts are written under `.reflow/runs/`.
+
+Workflows may declare:
+
+- `task: required|optional|none`
+- agent `instructions` as either one path or an ordered list of paths
+- optional agent `context` and `produces` metadata for prompt/status visibility
+- tagged transitions without `tag`, which default to `<route>`

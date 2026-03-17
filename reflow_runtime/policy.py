@@ -15,22 +15,27 @@ def snapshot_workspace(workspace: Path) -> WorkspaceSnapshot:
     for current_root, dirnames, filenames in os.walk(workspace, topdown=True, followlinks=False):
         current_path = Path(current_root)
         rel_root = current_path.relative_to(workspace)
-        if rel_root == Path(".reflow"):
+        if rel_root != Path(".") and _is_runtime_owned(rel_root):
             dirnames[:] = []
             continue
-        dirnames[:] = [name for name in dirnames if not _is_reflow_owned(rel_root / name)]
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not _is_runtime_owned(Path(name) if rel_root == Path(".") else (rel_root / name))
+        ]
 
         for name in sorted(dirnames + filenames):
             path = current_path / name
-            rel_path = (rel_root / name).as_posix().lstrip("./")
-            if not rel_path or _is_reflow_owned(Path(rel_path)):
+            rel_path = Path(name) if rel_root == Path(".") else (rel_root / name)
+            if _is_runtime_owned(rel_path):
                 continue
+            rel_path_str = rel_path.as_posix()
             try:
                 resolved = path.resolve(strict=False)
                 resolved.relative_to(root)
             except ValueError:
-                escape_paths.add(rel_path)
-            entries[rel_path] = _stat_signature(path)
+                escape_paths.add(rel_path_str)
+            entries[rel_path_str] = _stat_signature(path)
     return WorkspaceSnapshot(entries=entries, escape_paths=escape_paths)
 
 
@@ -49,7 +54,7 @@ def evaluate_policy(
     )
     violations: list[str] = []
     for escape_path in sorted(before.escape_paths | after.escape_paths):
-        if escape_path in changed_paths or escape_path in after.entries:
+        if escape_path in changed_paths:
             violations.append(f"{escape_path}: resolves outside workspace")
 
     if policy:
@@ -87,9 +92,5 @@ def _matches_any(path: str, patterns: list[str]) -> bool:
     return any(pure.match(pattern) or path == pattern for pattern in patterns)
 
 
-def _is_reflow_owned(path: Path) -> bool:
-    try:
-        first = path.parts[0]
-    except IndexError:
-        return False
-    return first == ".reflow"
+def _is_runtime_owned(path: Path) -> bool:
+    return bool(path.parts) and path.parts[0] == ".reflow"

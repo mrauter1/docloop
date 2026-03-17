@@ -2,102 +2,56 @@
 
 ## Objective
 
-Implement the normative behavior in [`refined_reflow_v1.2/SAD.md`](/workspace/CodexTest/docloop/refined_reflow_v1.2/SAD.md) as executable production code in this repository. The current repository has specification documents, `docloop.py`, `superloop.py`, `loop_control.py`, and tests, but no Reflow runtime yet. The target is a new CLI and runtime that satisfy the v1.2 contracts for workflow loading, provider execution, shell steps, run persistence, operator-input handling, resume/reply/stop, policy enforcement, and automated tests.
+Close the remaining conformance gaps between `refined_reflow_v1.2/SAD.md` and the existing runtime. This is a delta plan against the current codebase, not a greenfield design: `reflow.py`, `reflow_runtime/`, README guidance, and focused tests already exist. The remaining work is to fix the known correctness and safety blockers, tighten a few interface contracts, and add regression coverage that proves the runtime matches the SAD.
 
-## Current-state findings
+## Verified current state
 
-- The repository is small and currently script-oriented: [`docloop.py`](/workspace/CodexTest/docloop/docloop.py), [`superloop.py`](/workspace/CodexTest/docloop/superloop.py), and [`loop_control.py`](/workspace/CodexTest/docloop/loop_control.py) are the only implementation code.
-- The existing [`reflow/`](/workspace/CodexTest/docloop/reflow) directory is documentation-only (`SAD.md`, `source.md`), so runtime code must not use `reflow` as the import package name.
-- Existing tests cover loop-control helpers, Superloop behavior, git tracking, and SAD document integrity, but not a Reflow runtime.
-- The repository currently has no Python dependency manifest (`requirements*.txt`, `pyproject.toml`, `setup.py`, `setup.cfg` absent), so any new runtime dependency must be introduced intentionally and documented.
-- The SAD requires YAML workflow/config loading, JSON state files, provider subprocess wrappers, POSIX shell execution, append-only run artifacts, and one-controller-per-workspace semantics. None of that exists yet.
+- The runtime and CLI already exist in [reflow.py](/home/marcelo/code/docloop/reflow.py) and `reflow_runtime/`.
+- Reflow-specific tests already exist in [tests/test_reflow_runtime.py](/home/marcelo/code/docloop/tests/test_reflow_runtime.py) and [tests/test_refined_reflow_sad.py](/home/marcelo/code/docloop/tests/test_refined_reflow_sad.py).
+- The implementation task still has unresolved blocking findings in [implement/feedback.md](/home/marcelo/code/docloop/.superloop/tasks/implement-refined-reflow-v1-2-sad-md-as-function-d391842d/implement/feedback.md): `IMP-001` through `IMP-009`.
+- The current hot spots are [reflow_runtime/controller.py](/home/marcelo/code/docloop/reflow_runtime/controller.py), [reflow_runtime/providers.py](/home/marcelo/code/docloop/reflow_runtime/providers.py), [reflow_runtime/policy.py](/home/marcelo/code/docloop/reflow_runtime/policy.py), [reflow_runtime/storage.py](/home/marcelo/code/docloop/reflow_runtime/storage.py), and protocol/request assembly in [reflow_runtime/protocol.py](/home/marcelo/code/docloop/reflow_runtime/protocol.py).
 
-## Scope and constraints
+## Planning assumptions
+
+- `refined_reflow_v1.2/SAD.md` remains the normative behavioral source. Doc edits are out of scope except minimal reference sync if runtime wording must be clarified.
+- The repository structure is adequate. Fixes should refine current modules instead of introducing a new architecture.
+- KISS and DRY apply: centralize child-process handling, stop handling, and policy filtering only where repetition is already causing drift.
+- The implementation pair should treat `implement/feedback.md` blockers as first-class scope, not optional follow-up.
+
+## Scope
 
 ### In scope
 
-- New `reflow` CLI behavior for `run`, `resume`, `reply`, `status`, `stop`, and `list`
-- YAML config/workflow loading and validation
-- Agent and shell step execution
-- Provider wrappers for Codex and Claude
-- Run-state persistence under `.reflow/`
-- Operator-input lifecycle, including inline answers and `--full-auto`
-- Policy enforcement, required-file checks, loop/cycle accounting, and exit-code mapping
-- Unit and integration tests for the runtime
-- Minimal repository reference updates needed to document the executable runtime and new dependency
+- Fixing the known blocking issues `IMP-001` through `IMP-009`.
+- Tightening runtime invariants around `pending_input`, `active.json`, iteration numbering, and stop/interrupt behavior.
+- Hardening provider and shell invocation so the actual subprocess behavior matches persisted artifacts and stop semantics.
+- Fixing policy enforcement so unchanged escape symlinks do not fail runs, while child mutations under `.reflow/` remain visible and rejectable.
+- Adding regression tests that exercise the above paths without depending on real external provider CLIs.
+- Minimal README adjustments only if implementation changes reveal mismatched operator guidance.
 
-### Explicit non-goals
+### Out of scope
 
-- Refactoring `docloop.py` or `superloop.py` beyond trivial helper reuse proven necessary by tests
-- Rewriting the SAD beyond minimal cross-references required to point to the runtime
-- Adding git checkpoint behavior to Reflow
-- Cross-platform shell support beyond the SAD’s POSIX assumption
-- New workflow DSL features beyond the v1.2 SAD
-- Service/daemon mode, background controllers, or web UI
+- Redesigning the workflow model, run layout, or CLI surface beyond conformance fixes.
+- Feature expansion beyond the v1.2 SAD.
+- Editing `.superloop/.../plan/criteria.md`.
+- Broad repository refactors unrelated to Reflow runtime correctness.
 
-### Locked implementation assumptions
+## Code areas expected to change
 
-- Runtime code will live in a new package `reflow_runtime/` with a top-level CLI entry script `reflow.py`, avoiding collision with the docs-only [`reflow/`](/workspace/CodexTest/docloop/reflow) directory.
-- YAML parsing will use `PyYAML`; writing a bespoke YAML parser is unnecessary complexity. Because the repo lacks a dependency manifest, implementation should add a minimal `requirements.txt` containing `PyYAML` and document installation in [`README.md`](/workspace/CodexTest/docloop/README.md).
-- `status` and `list` will use stable human-readable text output, not a new machine-readable format, because the SAD leaves that output format intentionally lightweight.
-- Interactive answer collection will use stdin/tty prompts when available. Otherwise `run` and `resume` will leave the run in `awaiting_input`, and `reply` without usable stdin and without `--full-auto` will fail without mutating resolved input state.
-- The implementation should treat the SAD as the behavioral source of truth and keep doc edits minimal; code and tests are the primary deliverables for this task.
+- [reflow.py](/home/marcelo/code/docloop/reflow.py)
+- [reflow_runtime/controller.py](/home/marcelo/code/docloop/reflow_runtime/controller.py)
+- [reflow_runtime/providers.py](/home/marcelo/code/docloop/reflow_runtime/providers.py)
+- [reflow_runtime/policy.py](/home/marcelo/code/docloop/reflow_runtime/policy.py)
+- [reflow_runtime/storage.py](/home/marcelo/code/docloop/reflow_runtime/storage.py)
+- [reflow_runtime/protocol.py](/home/marcelo/code/docloop/reflow_runtime/protocol.py)
+- [tests/test_reflow_runtime.py](/home/marcelo/code/docloop/tests/test_reflow_runtime.py)
+- [README.md](/home/marcelo/code/docloop/README.md) only if behavior or operational expectations change materially
 
-## Target architecture
+## Stable interfaces to preserve
 
-### New files and responsibilities
+### CLI entrypoints
 
-- [`reflow.py`](/workspace/CodexTest/docloop/reflow.py)
-  - argparse entrypoint
-  - exit-code mapping
-  - command dispatch
-- `reflow_runtime/__init__.py`
-- `reflow_runtime/models.py`
-  - normalized dataclasses or typed-dict style models for config, workflow, run state, pending input, history events, and iteration metadata
-- `reflow_runtime/loaders.py`
-  - config/workflow parsing
-  - path normalization
-  - schema validation
-- `reflow_runtime/storage.py`
-  - `.reflow/` path helpers
-  - atomic JSON/text writes
-  - `active.json` handling
-  - run directory creation
-  - interrupted-iteration reconciliation
-- `reflow_runtime/protocol.py`
-  - parse `<questions>` blocks
-  - parse `<answers>` blocks
-  - parse tagged transition lines
-  - render request footers and malformed-control retry warnings
-- `reflow_runtime/providers.py`
-  - provider-profile resolution
-  - Codex and Claude argv builders
-  - subprocess execution and capture
-- `reflow_runtime/policy.py`
-  - before/after workspace diffing
-  - literal/glob policy checks
-  - required-file validation
-- `reflow_runtime/controller.py`
-  - run loop
-  - agent and shell iteration orchestration
-  - input lifecycle
-  - resume/reply/stop/list/status behaviors
-- `tests/test_reflow_*.py`
-  - unit and integration coverage
-- [`requirements.txt`](/workspace/CodexTest/docloop/requirements.txt)
-  - runtime dependency declaration for `PyYAML`
-
-### Reuse guidance
-
-- Reuse patterns from [`docloop.py`](/workspace/CodexTest/docloop/docloop.py) and [`superloop.py`](/workspace/CodexTest/docloop/superloop.py) only where directly compatible: CLI style, subprocess capture, path handling, and loop-control helper usage.
-- Do not attempt a speculative “shared orchestrator” refactor while introducing Reflow. Isolating Reflow code in its own runtime package is the lower-risk path.
-- Reuse [`loop_control.py`](/workspace/CodexTest/docloop/loop_control.py) only if a Reflow control path genuinely matches its contract; do not force-fit Reflow-specific `<questions>` / `<answers>` semantics into the Doc-Loop/Superloop loop-control schema.
-
-## Interface definitions
-
-### CLI surface
-
-The new CLI must implement:
+The CLI surface remains:
 
 ```text
 python3 reflow.py run <workflow> [--workspace <path>] [--full-auto]
@@ -108,281 +62,201 @@ python3 reflow.py stop <run_id> [--workspace <path>]
 python3 reflow.py list [--workspace <path>]
 ```
 
-Required exit-code contract:
+Exit codes remain:
 
-- `0`: completed, successful `status` / `list` / `stop`
+- `0`: success or completed action
 - `20`: provider unavailable
 - `21`: step failed
 - `22`: max loops exceeded
 - `23`: max cycles exceeded
 - `24`: blocked
-- `25`: internal/config/command-state error
+- `25`: config, command-state, or internal error
 - `26`: awaiting input
 - `27`: stopped
 
-Read-only command output minimums:
+`status` must continue to print at least:
 
-- `status` MUST report at least `run_id`, `workflow`, `status`, `current_step`, `cycle_count`, `started_at`, and `updated_at`.
-- If the run is `awaiting_input`, `status` MUST also report the pending-input `step`, `loop`, question count, and current `auto_round`.
-- If the run is `failed`, `status` MUST also report `failure_type` and `failure_reason`.
-- `list` MUST enumerate runs from `.reflow/runs/` only.
-- Each `list` row MUST include at least `run_id`, `workflow`, `status`, and `updated_at`.
-- `list` output MUST be sorted by `started_at` descending.
-- v1.2 does not require a machine-stable output format for either command, so implementation should centralize one human-readable formatter and test the required fields and sort order rather than brittle full-string snapshots.
+- `run_id`
+- `workflow`
+- `status`
+- `current_step`
+- `cycle_count`
+- `started_at`
+- `updated_at`
+- when awaiting input: `pending_step`, `pending_loop`, `pending_question_count`, `pending_auto_round`
+- when failed: `failure_type`, `failure_reason`
 
-### Core runtime interfaces
+`list` must continue to enumerate `.reflow/runs/` only and sort rows by `started_at` descending.
 
-The implementation should converge on these internal entrypoints:
+### Runtime functions
 
-```python
-def load_config(workspace: Path) -> ReflowConfig: ...
-def load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> Workflow: ...
-def run_new_workflow(workspace: Path, workflow_name: str, full_auto: bool) -> int: ...
-def resume_run(workspace: Path, run_id: str, full_auto: bool) -> int: ...
-def reply_to_run(workspace: Path, run_id: str, full_auto: bool) -> int: ...
-def stop_run(workspace: Path, run_id: str) -> int: ...
-def status_run(workspace: Path, run_id: str) -> int: ...
-def list_runs(workspace: Path) -> int: ...
-```
-
-Supporting interfaces:
+These entrypoints stay stable:
 
 ```python
-def reserve_iteration(store: RunStore, run: RunState, step_name: str) -> IterationContext: ...
-def reconcile_reserved_iteration(store: RunStore, run: RunState) -> None: ...
-def render_agent_request(workflow: Workflow, run: RunState, step: AgentStep, warning: str | None) -> str: ...
-def invoke_provider(profile: ProviderProfile, request: str, workspace: Path, iteration_dir: Path | None, final_path: Path | None) -> InvocationResult: ...
-def invoke_shell(cmd: str, workspace: Path, env_overrides: dict[str, str]) -> InvocationResult: ...
-def parse_agent_outcome(final_text: str, transitions: TransitionSpec) -> AgentOutcome: ...
-def parse_full_auto_answers(stdout_text: str, expected_count: int) -> list[str]: ...
-def evaluate_policy(before: WorkspaceSnapshot, after: WorkspaceSnapshot, policy: StepPolicy | None) -> PolicyResult: ...
+load_config(workspace: Path) -> ReflowConfig
+load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> Workflow
+run_new_workflow(workspace: Path, workflow_name: str, full_auto: bool) -> int
+resume_run(workspace: Path, run_id: str, full_auto: bool) -> int
+reply_to_run(workspace: Path, run_id: str, full_auto: bool) -> int
+stop_run(workspace: Path, run_id: str) -> int
+status_run(workspace: Path, run_id: str) -> int
+list_runs(workspace: Path) -> int
 ```
 
-### Persisted data contracts
+Supporting contracts that should remain centralized after the fixes:
 
-The implementation must persist and round-trip these artifacts:
+```python
+render_agent_request(...)
+parse_agent_outcome(...)
+parse_full_auto_answers(...)
+build_provider_argv(...)
+build_shell_argv(...)
+invoke_provider(...)
+invoke_shell(...)
+evaluate_policy(...)
+RunStore.write_active(...)
+RunStore.reserve_iteration(...)
+RunStore.finalize_iteration(...)
+RunStore.reconcile_reserved_iteration(...)
+```
+
+### Persistence and artifact contract
+
+The runtime continues to own these artifacts:
 
 - `.reflow/config.yaml`
-- `.reflow/workflows/<workflow>/workflow.yaml`
 - `.reflow/active.json`
+- `.reflow/workflows/<workflow>/workflow.yaml`
 - `.reflow/runs/<run_id>/run.json`
 - `.reflow/runs/<run_id>/history.jsonl`
 - `.reflow/runs/<run_id>/operator_inputs.md`
-- `.reflow/runs/<run_id>/steps/<step>/<loop>/request.txt` for agent steps
-- `.reflow/runs/<run_id>/steps/<step>/<loop>/command.txt` for shell steps
+- `.reflow/runs/<run_id>/steps/<step>/<loop>/request.txt`
+- `.reflow/runs/<run_id>/steps/<step>/<loop>/command.txt`
 - `.reflow/runs/<run_id>/steps/<step>/<loop>/stdout.txt`
 - `.reflow/runs/<run_id>/steps/<step>/<loop>/stderr.txt`
 - `.reflow/runs/<run_id>/steps/<step>/<loop>/final.txt`
 - `.reflow/runs/<run_id>/steps/<step>/<loop>/meta.json`
 
-Non-negotiable persistence rules:
+Required behavioral details to preserve or enforce:
 
-- All JSON, text, Markdown, and YAML must be UTF-8.
-- Persisted paths must be repo-relative with forward slashes.
-- `run.json` and `active.json` writes must be atomic.
-- `history.jsonl` must be append-only JSONL.
-- A reserved iteration must be persisted before child-process launch.
-- Full-auto answer passes must not create iteration directories or increment loop or cycle counters.
-
-### Provider wrapper contract
-
-- Codex wrapper must build `codex exec --cd <workspace> ... --output-last-message <final.txt> "<request>"`.
-- Claude wrapper must build `claude -p "<request>" ...` and mirror stdout into `final.txt`.
-- Provider wrappers must execute argv directly without a shell.
-- Reserved provider args from the SAD must be validation errors, not runtime best-effort warnings.
-- Provider resolution order must follow SAD Section 4.1 exactly: step override, workflow default, config default.
-- Provider invocation must honor the resolved profile `timeout_sec`, defaulting to `1800` when omitted.
-- Provider child processes must inherit the controller environment merged with provider `env`, with provider `env` overriding inherited keys.
-- `meta.json.command_argv` for provider steps must record the exact argv passed to process creation, after wrapper construction and before launch.
-
-### Shell-step runtime contract
-
-- Shell steps must execute via exact argv `["/bin/sh", "-lc", "<cmd>"]`.
-- The shell environment must include the inherited controller environment plus these mandatory runtime variables: `REFLOW_RUN_ID`, `REFLOW_WORKFLOW`, `REFLOW_STEP`, `REFLOW_LOOP`, `REFLOW_WORKSPACE`, and `REFLOW_ITERATION_DIR`.
-- `command.txt` must contain the exact `cmd` string from the workflow.
-- `meta.json.command_argv` for shell steps must be exactly `["/bin/sh", "-lc", "<cmd>"]`.
-- `meta.json.command_text` must record the exact workflow command text.
-- Shell-step acceptance and regression tests must assert both the exported runtime variables and the recorded command artifacts so fixture scripts can rely on the documented contract.
-
-### Control parsing contract
-
-- Agent iterations must check for a valid final `<questions>` block before transition parsing.
-- If questions are present, no transition target is accepted.
-- Tagged transitions must parse the last valid matching line only.
-- Invalid mixed control output must be treated as protocol failure and routed through `step_failed` or retry semantics.
-- Full-auto answer parsing must enforce one `<answer>` per pending question, in order.
+- Shell steps must execute and persist the exact same argv: `["/bin/sh", "-lc", "<cmd>"]`.
+- Shell-step child env must include `REFLOW_RUN_ID`, `REFLOW_WORKFLOW`, `REFLOW_STEP`, `REFLOW_LOOP`, `REFLOW_WORKSPACE`, and `REFLOW_ITERATION_DIR`.
+- `meta.json.command_argv` and `meta.json.command_text` must match the actual shell invocation.
+- `pending_input` may exist only when `run.status == "awaiting_input"`.
+- Full-auto answer passes are not workflow iterations: they must not increment `step_loops`, must not increment `cycle_count`, and must not create a step iteration directory.
+- `active.json` must represent the live controller-owned run and, while a provider or shell child is active, must carry the live child PID needed by `stop` and interrupt handling.
+- Policy evaluation must inspect child-authored workspace mutations, including `.reflow/` writes, while avoiding false positives from unchanged pre-existing escape symlinks.
 
 ## Milestones
 
-### Milestone 1: Foundation, validation, and storage
+### Milestone 1: Controller-state and stop-path correctness
+
+Goal: make run state, lock state, and terminalization behavior trustworthy under interruption and input waits.
 
 Deliverables:
 
-- Add `reflow.py` and `reflow_runtime/` package skeleton.
-- Add `requirements.txt` with `PyYAML` and import-failure messaging.
-- Implement config and workflow loaders with v1.2 validation.
-- Implement path normalization, workspace-root enforcement, and symlink-escape checks.
-- Implement run ID generation, run directory creation, `operator_inputs.md` bootstrap, `run.json` creation, `active.json` creation and removal, and history append helpers.
-- Implement read-only `status` and `list`.
+- Fix `pending_input` lifecycle so `awaiting_input` is persisted before any new `pending_input` record is saved or `auto_round` is incremented.
+- Route `KeyboardInterrupt` and SIGINT through the same stop reconciliation path used by `reflow stop`.
+- Ensure `reply` is covered by the same stop guard during pre-drive input resolution, not only once `_drive_run()` starts.
+- Keep `active.json` aligned with the live run status while waiting for input and while child processes are active.
+- Verify iteration reconciliation records `interrupted` metadata and clears stale active locks when runs stop.
 
 Acceptance criteria:
 
-- Invalid config and workflow fixtures fail before execution with exit `25`.
-- `run`, `status`, and `list` can create and inspect a minimal run directory structure.
-- `status` reports the SAD-required minimum fields, plus the `awaiting_input` and `failed` conditional fields when applicable.
-- `list` reads `.reflow/runs/` only and sorts runs by `started_at` descending.
-- Tests cover loader validation, lock staleness detection, atomic write helpers, dependency-import failure, and exit-code mapping.
+- Interrupting `run`, `resume`, or `reply` leaves the run terminalized as `stopped`, reconciles any reserved iteration to `interrupted`, and removes or updates `active.json` appropriately.
+- No persisted `run.json` state exists where `pending_input` is present while status is `running`.
+- `reply` interrupted during inline prompt collection or full-auto answer collection exits `27` and leaves the run `stopped`, not `awaiting_input`.
+- Tests cover both controller-level stop flow and direct `reflow stop <run_id>` behavior against live controller and child PID state.
 
-### Milestone 2: Step execution and transitions
+### Milestone 2: Iteration, protocol, and provider/shell conformance
+
+Goal: eliminate runtime/spec drift in loop numbering, malformed control retries, and child-process execution.
 
 Deliverables:
 
-- Implement agent-step instruction loading from file or `SKILL.md` references defined by the workflow.
-- Implement request rendering with the required footer and repository-resident memory references.
-- Implement Codex and Claude wrapper command construction and subprocess capture.
-- Implement shell-step execution through `/bin/sh -lc`.
-- Implement iteration directory reservation, initial and final `meta.json`, stdout/stderr/final capture, decision parsing, `@retry`, and terminal transitions.
-- Implement step-loop and cycle accounting.
+- Reserve or otherwise determine the next loop number before rendering the agent footer so `request.txt` and persisted iteration metadata agree.
+- Implement malformed control-output retry behavior for agent steps: finalize the current iteration as failed, attach a warning to the next request, and only terminalize on actual loop-budget exhaustion.
+- Centralize process launching so provider and shell invocations share consistent child PID publication, timeout handling, interrupt termination, and artifact recording.
+- Verify provider wrapper behavior for both Codex and Claude command construction, merged env handling, and timeout propagation.
+- Confirm full-auto answer parsing and retry/wait transitions keep step-loop accounting unchanged.
 
 Acceptance criteria:
 
-- Fixture-based providers can drive happy-path multi-step workflows.
-- Provider fixtures verify timeout propagation, inherited-env plus provider-env merge behavior, and exact recorded argv.
-- Shell success and failure routing works through `on_success` and `on_failure`.
-- Shell fixtures verify `REFLOW_RUN_ID`, `REFLOW_WORKFLOW`, `REFLOW_STEP`, `REFLOW_LOOP`, `REFLOW_WORKSPACE`, and `REFLOW_ITERATION_DIR`, plus `command.txt`, `meta.json.command_argv`, and `meta.json.command_text`.
-- Retry and budget exhaustion semantics match the SAD.
+- The first request for a step advertises loop `1`, and every subsequent retry/restart request matches the reserved iteration directory number.
+- One malformed `<questions>` or invalid decision tag does not immediately terminalize the run while retry budget remains.
+- Provider and shell subprocesses are launched via one consistent path that publishes `child_pid` before waiting and clears it afterwards.
+- `stop` and Ctrl+C terminate the actual live child process before the run is marked `stopped`.
+- Tests assert exact argv for Codex, Claude, and shell paths, plus timeout/env behavior without requiring real provider CLIs.
+- Full-auto tests prove no extra workflow iteration directory is created and no `step_loops` increment occurs during auto-answer passes.
 
-### Milestone 3: Operator-input lifecycle
+### Milestone 3: Policy enforcement closure and verifier-facing regression coverage
+
+Goal: close the remaining correctness and safety blockers in policy enforcement and prove the runtime is ready for re-review.
 
 Deliverables:
 
-- Implement `<questions>` detection and `pending_input` persistence.
-- Implement inline interactive answer collection for `run` and `resume` when stdin is available.
-- Implement append-only `operator_inputs.md` formatting for `human` and `auto` modes.
-- Implement `reply` and `resume` semantics, including lock reacquisition and interrupted-iteration reconciliation.
-- Implement `--full-auto` answer flow, including auto-round incrementing, provider reuse, success path, and failure-to-`awaiting_input` behavior.
+- Fix `snapshot_workspace()` and policy diffing so unchanged escape symlinks do not fail no-op steps.
+- Ensure child writes under `.reflow/` are visible to policy evaluation and can trigger `allow_write` / `forbid_write` failures.
+- Preserve controller-owned writes as exempt only where the controller itself created or updated them as part of normal runtime bookkeeping.
+- Add focused tests for the `IMP-008` and `IMP-009` cases, plus an integration-style path that combines workflow execution, policy enforcement, and terminal failure reporting.
+- Re-run focused Reflow tests and, if practical, the broader repository suite after changes stabilize.
 
 Acceptance criteria:
 
-- Tests cover inline question resolution, deferred `reply`, auto-answer success, auto-answer failure, and the no-counter-increment rule for full-auto passes.
-- `reply_started`, `input_requested`, `input_auto_failed`, and `input_resolved` history entries appear with the required fields and ordering.
-
-### Milestone 4: Policy enforcement, stop semantics, and hardening
-
-Deliverables:
-
-- Implement write-policy diffing for create/modify/delete/rename with normalized repo-relative paths.
-- Enforce `allow_write`, `forbid_write`, and `required_files`.
-- Treat out-of-workspace writes and symlink escapes as policy violations.
-- Implement `stop`, controller-subprocess termination, interrupted iteration finalization, and idempotent terminalization.
-- Harden failure classification for provider unavailable, malformed control, required-files missing, shell launch failure, and storage errors.
-
-Acceptance criteria:
-
-- Tests cover policy literal and glob matching, rename checks, required-file failure, write-policy violation, provider unavailable, malformed question/answer/decision output, `stop`, and interrupted resume recovery.
-
-### Milestone 5: Repository polish and regression seal
-
-Deliverables:
-
-- Update [`README.md`](/workspace/CodexTest/docloop/README.md) with Reflow usage, dependency requirements, and fixture-based examples.
-- Add end-to-end integration fixtures that model a Doc-Loop-like workflow from Section 23 of the SAD.
-- Run the full test suite, including existing Doc-Loop and Superloop tests, to confirm isolation.
-- Limit SAD or pointer-doc edits to minimal references needed to mention the executable runtime, if any such references are required at all.
-
-Acceptance criteria:
-
-- Full `pytest` passes.
-- Existing non-Reflow tests remain green.
-- New tests demonstrate one complete workflow, one blocked workflow, and one failed workflow.
-
-## Implementation checklist
-
-- [ ] Add isolated `reflow.py` CLI and `reflow_runtime/` package.
-- [ ] Add `requirements.txt` and README dependency instructions for `PyYAML`.
-- [ ] Implement config and workflow validators matching SAD Section 20.
-- [ ] Implement storage helpers for `.reflow/`, atomic writes, and history.
-- [ ] Implement run-state models including `pending_input`.
-- [ ] Implement provider resolution and Codex/Claude wrappers.
-- [ ] Implement agent request rendering and protocol parsers.
-- [ ] Implement shell-step runner with exact `REFLOW_*` runtime variables and command artifact persistence.
-- [ ] Implement exact `status` / `list` field minimums and `started_at` descending ordering.
-- [ ] Implement step-loop, cycle, retry, and terminal-state logic.
-- [ ] Implement operator-input lifecycle, `resume`, `reply`, and `--full-auto`.
-- [ ] Implement `stop`.
-- [ ] Implement policy and required-file enforcement.
-- [ ] Add unit tests.
-- [ ] Add integration tests with fixture provider CLIs.
-- [ ] Update README and any minimal runtime-reference docs.
+- A pre-existing symlink that resolves outside the workspace does not fail a no-op iteration unless the iteration changed that path or wrote through it.
+- A child step that mutates `.reflow/config.yaml`, `.reflow/active.json`, or run artifacts is detected by policy enforcement and fails the step.
+- Policy tests differentiate controller-authored bookkeeping from child-authored state tampering.
+- The implementation task’s known blockers `IMP-008` and `IMP-009` are explicitly covered by regression tests.
 
 ## Test strategy
 
-### Unit coverage
+The implementation pair should add or adjust tests in [tests/test_reflow_runtime.py](/home/marcelo/code/docloop/tests/test_reflow_runtime.py) rather than creating a parallel suite.
 
-- config validation, including reserved provider flags and unknown fields
-- workflow validation for step kinds, transitions, budgets, policies, and instruction paths
-- request and footer rendering
-- `<questions>` parser, tagged decision parser, and `<answers>` parser
-- operator-input markdown formatting
-- provider argv construction
-- provider timeout and merged environment behavior
-- policy matching for literals, globs, renames, and symlink escapes
-- `status` conditional fields and `list` `started_at` descending ordering
-- exit-code mapping and stale-lock detection
-- atomic write and interrupted-iteration reconciliation helpers
-- shell command artifact persistence and mandatory runtime environment variables
+Required coverage additions:
 
-### Integration coverage
+- Interrupt/stop tests for `run`, `resume`, and `reply`, including child subprocess termination and reserved-iteration reconciliation.
+- Pending-input invariant tests covering interactive wait, full-auto success, full-auto failure, and interrupted reply flows.
+- Malformed-control retry tests proving the run stays non-terminal until loop budget is exhausted and the next request carries a warning.
+- Loop-number/request-footer tests proving `request.txt` loop values match iteration directory numbering.
+- Provider-wrapper tests for Codex and Claude argv, merged `env`, `timeout_sec`, unavailable-command behavior, and shell argv consistency.
+- Policy tests for unchanged escape symlinks, writes through escaping paths, and child-authored `.reflow/` mutations.
+- End-to-end tests that cover a successful path, a blocked/awaiting-input path, a protocol-retry path, and a policy-failure path.
 
-- happy-path agent -> agent workflow
-- agent -> shell -> `@done`
-- `status` for running, awaiting-input, and failed runs includes the required field set
-- `list` ordering uses `started_at` descending and ignores non-run files
-- inline interactive question handling
-- `awaiting_input` then `reply`
-- `--full-auto` success and failure
-- malformed control output causing retry or failure
-- missing decision tag default behavior where the SAD allows it
-- invalid decision tag value
-- provider unavailable
-- provider timeout and provider `env` override behavior
-- max loops exceeded
-- max cycles exceeded
-- write-policy violation
-- required-file missing
-- shell fixture observes required `REFLOW_*` variables and exact command artifacts
-- interrupted iteration reconciliation on `resume`
-- `stop` marking a run `stopped`
+Suggested verification command sequence:
 
-### Test harness approach
+```text
+pytest -q tests/test_reflow_runtime.py tests/test_refined_reflow_sad.py
+pytest -q
+```
 
-- Use `pytest` temp workspaces.
-- Add fake provider executables under test fixtures and prepend them to `PATH` so wrapper behavior is deterministic without network access.
-- Use fixture workflows and configs that write predictable `final.txt`, stdout, stderr, and exit codes.
-- Keep all new tests additive; existing tests for Doc-Loop and Superloop must remain untouched except for shared utility reuse proven necessary.
+The broader `pytest -q` run is desirable but secondary if unrelated repository failures already exist.
 
-## Risk register
+## Implementation order
 
-| ID | Risk | Impact | Mitigation / control | Rollback or containment |
-| ---- | ---- | ---- | ---- | ---- |
-| R1 | Python module naming collides with docs directory `reflow/` | Import confusion; broken docs-path assumptions | Use `reflow.py` plus `reflow_runtime/`; keep [`reflow/`](/workspace/CodexTest/docloop/reflow) docs-only | Rename the runtime package before expanding functionality further |
-| R2 | `PyYAML` is missing or inconsistently installed | CLI fails before useful validation | Add `requirements.txt`, centralized import guard, and README install instructions | Fail fast with exit `25` and actionable error text |
-| R3 | Lock and stale-PID logic misclassifies active vs stale controllers | Data corruption or false command refusal | Require both PID-liveness and run-state consistency checks; cover stale and live locks in tests | Prefer refusal over forced takeover and allow operator retry after the process exits |
-| R4 | Policy diffing misses rename, symlink, or workspace-escape cases | Workspace contamination beyond allowed paths | Normalize repo-relative and real paths, evaluate both sides of a rename, and treat outside-workspace resolutions as violations | Terminally fail the affected run and preserve artifacts for inspection |
-| R5 | Full-auto answer flow increments loop or cycle counters or creates iteration dirs | Run-state drift and spec violation | Implement full-auto as a separate code path from normal step iteration and assert counter invariants in tests | Keep `pending_input` intact and return to `awaiting_input` on anomaly |
-| R6 | Stop, resume, or reply mutates partially written iterations incorrectly | Corrupt `run.json`, history, or step artifacts | Centralize reservation, finalization, and reconciliation in storage and controller layers; use atomic writes only | Preserve partial artifacts, mark interrupted, and start a fresh next loop |
-| R7 | Provider CLI flags drift from current local Codex or Claude builds | Commands fail at runtime despite valid config | Centralize wrapper builders, validate reserved args, and assert exact argv in tests | Surface `provider_unavailable` or `step_failed` with captured stdout and stderr |
-| R7a | `status` / `list` output omits required fields or sorts runs incorrectly | CLI appears usable but violates SAD observability guarantees and fails review/tests | Centralize read-only formatters around explicit field minimums and sort helpers; cover running, awaiting-input, and failed cases in tests | Patch the formatter without changing persisted run state |
-| R7b | Shell workflows cannot rely on required runtime variables or command artifacts | Fixture scripts and real shell steps fail unpredictably and are harder to debug | Centralize shell launch preparation, export the mandatory `REFLOW_*` variables, and assert `command.txt` plus `meta.json` contents in tests | Fail visibly, preserve the iteration directory, and fix the launch helper without broader runtime rewrites |
-| R8 | Reflow implementation accidentally regresses Doc-Loop or Superloop | Existing repository behavior breaks | Keep Reflow isolated; avoid opportunistic refactors; run full `pytest` before completion | Revert shared-helper reuse and localize logic back into Reflow if needed |
-| R9 | SAD-only phrases are interpreted too literally when code hits unspecified edges | Implementation churn or verifier disagreement | Use the SAD as the source of truth, but record any truly ambiguous behavior in task-local implementation notes and keep doc edits minimal and explicit | Escalate only the narrow ambiguity instead of broad doc rewrites |
+1. Fix stop and state-invariant issues in `controller.py`, `providers.py`, and `storage.py` first, because they affect every other workflow path.
+2. Add failing tests for interrupt handling, `pending_input` state order, and live child PID ownership before or alongside those fixes.
+3. Fix iteration numbering and malformed-control retry behavior in `controller.py` and `protocol.py`.
+4. Centralize provider/shell subprocess execution details and lock the exact shell/provider artifact contract with tests.
+5. Patch `policy.py` so change-based escape detection and `.reflow/` child-write visibility are both correct.
+6. Re-run focused tests, then broader tests if feasible, and sync README only if operator-facing behavior changed.
 
-## Order of execution for implementation pair
+## Risks and controls
 
-1. Land the isolated package skeleton, dependency declaration, models, loaders, storage helpers, and read-only commands first.
-2. Land agent and shell execution plus provider wrappers next, with unit tests before broad integration tests.
-3. Add operator-input lifecycle, `resume`, and `reply`.
-4. Add policy enforcement and `stop`.
-5. Finish with README updates, minimal runtime references, and full-suite verification.
+| ID | Risk | Impact | Control |
+| --- | --- | --- | --- |
+| R1 | Stop-path fixes leave stale `active.json` or half-finalized iterations | Resume/stop semantics become nondeterministic | Add interrupt-path tests first, route all stop paths through one reconciliation helper, and verify `active.json` after every terminal path |
+| R2 | Child PID tracking is updated too late or cleared too early | `stop` marks runs stopped while children keep mutating the workspace | Publish `child_pid` immediately after `Popen`, clear it in `finally`, and assert actual child termination in tests |
+| R3 | Malformed-control retry logic corrupts loop accounting | False `max_loops_exceeded` or mismatched request footer/iteration state | Reserve iteration once, finalize it once, and assert `request.txt` loop numbers and `step_loops` at each retry |
+| R4 | Policy filtering over-corrects and hides real `.reflow/` tampering | Safety regression despite passing happy-path tests | Separate controller-authored bookkeeping from child diffs explicitly; add negative tests for `.reflow` mutations |
+| R5 | Policy escape detection remains too broad | Benign repos with existing escape symlinks fail unexpectedly | Base escape violations on changed paths and add no-op symlink regression tests |
+| R6 | README/doc sync becomes a side quest | Unnecessary churn and verifier noise | Limit docs edits to concrete operator-visible behavior changes after tests pass |
 
-This order keeps each checkpoint shippable, minimizes blast radius, and defers the riskiest state-management features until persistence and execution primitives are already test-backed.
+## Completion gate
+
+This plan is complete when the implementation pair can execute it without reinterpretation:
+
+- all currently documented blocking findings `IMP-001` through `IMP-009` are in scope
+- milestones map directly to existing modules and tests
+- CLI, runtime, persistence, and shell/provider contracts are explicit
+- risk controls focus on the real regression surface
+- the work remains incremental and does not require architectural redesign

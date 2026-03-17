@@ -6,7 +6,9 @@ from pathlib import Path
 import superloop
 
 from superloop import (
+    CodexCommandConfig,
     EventRecorder,
+    append_clarification,
     append_raw_phase_log,
     append_run_log,
     create_run_paths,
@@ -18,26 +20,39 @@ from superloop import (
     open_existing_run_paths,
     latest_run_status,
     resolve_task_id,
+    task_request_text,
     task_id_for_run,
     write_run_summary,
 )
 
 
+def fake_codex_command() -> CodexCommandConfig:
+    return CodexCommandConfig(
+        start_command=["codex", "exec", "--json", "-"],
+        resume_command=["codex", "exec", "resume", "--json"],
+    )
+
+
 def test_create_run_paths_creates_per_run_artifacts(tmp_path: Path):
-    run_paths = create_run_paths(tmp_path, "run-test-123")
+    run_paths = create_run_paths(tmp_path, "run-test-123", "Implement feature X")
 
     assert run_paths["run_dir"].is_dir()
     assert run_paths["run_log"].exists()
     assert run_paths["raw_phase_log"].exists()
     assert run_paths["events_file"].exists()
     assert run_paths["summary_file"].parent == run_paths["run_dir"]
+    assert run_paths["request_file"].read_text(encoding="utf-8").strip() == "Implement feature X"
+    session_payload = json.loads(run_paths["session_file"].read_text(encoding="utf-8"))
+    assert session_payload["mode"] == "persistent"
+    assert session_payload["thread_id"] is None
 
 
 def test_open_existing_run_paths_reuses_existing_artifacts(tmp_path: Path):
-    create_run_paths(tmp_path, "run-test-123")
+    create_run_paths(tmp_path, "run-test-123", "Implement feature X")
     opened = open_existing_run_paths(tmp_path, "run-test-123")
     assert opened["run_dir"].name == "run-test-123"
     assert opened["events_file"].exists()
+    assert opened["request_file"].read_text(encoding="utf-8").strip() == "Implement feature X"
 
 
 def test_raw_phase_log_includes_run_cycle_attempt(tmp_path: Path):
@@ -63,7 +78,7 @@ def test_raw_phase_log_includes_run_cycle_attempt(tmp_path: Path):
 
 
 def test_event_recorder_and_summary_counts(tmp_path: Path):
-    run_paths = create_run_paths(tmp_path, "run-abc")
+    run_paths = create_run_paths(tmp_path, "run-abc", "Implement feature X")
     recorder = EventRecorder(run_id="run-abc", events_file=run_paths["events_file"])
 
     recorder.emit("pair_started", pair="plan")
@@ -83,7 +98,7 @@ def test_event_recorder_and_summary_counts(tmp_path: Path):
 
 
 def test_load_resume_checkpoint_skips_completed_pairs_and_continues_cycle(tmp_path: Path):
-    run_paths = create_run_paths(tmp_path, "run-abc")
+    run_paths = create_run_paths(tmp_path, "run-abc", "Implement feature X")
     recorder = EventRecorder(run_id="run-abc", events_file=run_paths["events_file"])
     recorder.emit("pair_completed", pair="plan", cycle=1, attempt=1)
     recorder.emit("phase_finished", pair="implement", phase="producer", cycle=2, attempt=3)
@@ -109,7 +124,7 @@ def test_append_run_log_scopes_entries(tmp_path: Path):
 
 def test_main_fatal_error_still_writes_terminal_event_and_summary(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: ["codex", "exec"])
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
     monkeypatch.setattr(
         superloop,
         "run_codex_phase",
@@ -216,7 +231,7 @@ def test_latest_run_status_reads_last_run_finished(tmp_path: Path):
 
 def test_main_resume_refuses_terminal_run(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: ["codex", "exec"])
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
 
     paths = ensure_workspace(
         root=tmp_path,
@@ -224,7 +239,7 @@ def test_main_resume_refuses_terminal_run(tmp_path: Path, monkeypatch):
         product_intent=None,
         intent_mode="preserve",
     )
-    run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12")
+    run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Resume request")
     recorder = EventRecorder(run_id="run-20260316T120000Z-abcdef12", events_file=run_paths["events_file"])
     recorder.emit("run_finished", status="success")
 
@@ -257,11 +272,96 @@ def test_task_id_for_run_finds_task_containing_run(tmp_path: Path):
     assert task_id_for_run(tasks_dir, "run-2") == "task-y"
 
 
-def test_intent_derived_task_id_is_collision_resistant_for_similar_prefixes():
+def test_resolve_task_id_preserves_long_explicit_task_ids():
     intent_a = "Implement refined reflow v1.2 with strict verification and artifact scoping alpha"
     intent_b = "Implement refined reflow v1.2 with strict verification and artifact scoping beta"
-    assert superloop.slugify_task(intent_a) == superloop.slugify_task(intent_b)
-    assert derive_intent_task_id(intent_a) != derive_intent_task_id(intent_b)
+    assert resolve_task_id(intent_a, None) == superloop.slugify_task(intent_a)
+    assert resolve_task_id(intent_b, None) == superloop.slugify_task(intent_b)
+    assert resolve_task_id(intent_a, None) != resolve_task_id(intent_b, None)
+
+
+def test_derive_intent_task_id_truncates_long_slug_but_keeps_hash_uniqueness():
+    intent_a = "x " * 300
+    intent_b = "x " * 299 + "y"
+
+    task_id_a = derive_intent_task_id(intent_a)
+    task_id_b = derive_intent_task_id(intent_b)
+
+    assert len(task_id_a.split("-")[-1]) == 8
+    assert len(task_id_a) <= 57
+    assert task_id_a != task_id_b
+
+
+def test_derive_intent_task_id_strips_trailing_hyphen_from_truncated_slug():
+    intent = ("abc-" * 20) + "tail"
+
+    task_id = derive_intent_task_id(intent)
+    slug, digest = task_id.rsplit("-", 1)
+
+    assert not slug.endswith("-")
+    assert len(digest) == 8
+
+
+def test_ensure_workspace_accepts_long_intent_derived_task_ids(tmp_path: Path):
+    intent = "x " * 300
+
+    task_id = derive_intent_task_id(intent)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id=task_id,
+        product_intent=intent,
+        intent_mode="preserve",
+    )
+
+    assert paths["task_dir"].name == task_id
+    assert paths["task_dir"].is_dir()
+    assert (paths["task_dir"] / "task.json").exists()
+
+
+def test_resume_accepts_long_explicit_task_id(tmp_path: Path, monkeypatch):
+    task_id = "implement-refined-reflow-v1-2-sad-md-as-function-d391842d"
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id=task_id,
+        product_intent="Long explicit resume request",
+        intent_mode="preserve",
+    )
+    create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Long explicit resume request")
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            task_id,
+            "--resume",
+            "--run-id",
+            "run-20260316T120000Z-abcdef12",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
 
 
 def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: Path):
@@ -275,15 +375,17 @@ def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: P
     task_dir = tmp_path / ".superloop" / "tasks" / "my-task"
     assert paths["task_dir"] == task_dir
     assert (task_dir / "task.json").exists()
-    assert (task_dir / "context.md").exists()
     assert (task_dir / "plan" / "prompt.md").exists()
+    assert not (task_dir / "context.md").exists()
+    assert task_request_text(paths["task_meta_file"], paths["legacy_context_file"]) == "Implement feature X"
 
     plan_prompt = (task_dir / "plan" / "prompt.md").read_text(encoding="utf-8")
     assert ".superloop/tasks/my-task/plan/plan.md" in plan_prompt
     assert ".superloop/plan/plan.md" not in plan_prompt
+    assert ".superloop/context.md" not in plan_prompt
 
 
-def test_ensure_workspace_preserve_mode_keeps_existing_context(tmp_path: Path):
+def test_ensure_workspace_preserve_mode_keeps_existing_request(tmp_path: Path):
     ensure_workspace(
         root=tmp_path,
         task_id="same-task",
@@ -297,6 +399,228 @@ def test_ensure_workspace_preserve_mode_keeps_existing_context(tmp_path: Path):
         intent_mode="preserve",
     )
 
-    context_text = (tmp_path / ".superloop" / "tasks" / "same-task" / "context.md").read_text(encoding="utf-8")
-    assert "Intent A" in context_text
-    assert "Intent B" not in context_text
+    task_meta = json.loads((tmp_path / ".superloop" / "tasks" / "same-task" / "task.json").read_text(encoding="utf-8"))
+    assert task_meta["request_text"] == "Intent A"
+
+
+def test_ensure_workspace_does_not_rewrite_existing_task_prompts(tmp_path: Path):
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="same-task",
+        product_intent="Intent A",
+        intent_mode="replace",
+    )
+    prompt_file = paths["task_dir"] / "plan" / "prompt.md"
+    verifier_prompt_file = paths["task_dir"] / "plan" / "verifier_prompt.md"
+    prompt_file.write_text("custom prompt\n", encoding="utf-8")
+    verifier_prompt_file.write_text("custom verifier prompt\n", encoding="utf-8")
+
+    ensure_workspace(
+        root=tmp_path,
+        task_id="same-task",
+        product_intent="Intent B",
+        intent_mode="preserve",
+    )
+
+    assert prompt_file.read_text(encoding="utf-8") == "custom prompt\n"
+    assert verifier_prompt_file.read_text(encoding="utf-8") == "custom verifier prompt\n"
+
+
+def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path: Path):
+    run_paths = create_run_paths(tmp_path, "run-clarify", "Initial request")
+    task_raw_log = tmp_path / "task_raw_phase_log.md"
+    task_raw_log.write_text("# Task Raw\n", encoding="utf-8")
+
+    append_clarification(
+        run_paths["raw_phase_log"],
+        task_raw_log,
+        run_paths["session_file"],
+        pair="plan",
+        phase="producer",
+        cycle=1,
+        attempt=2,
+        question="Question text\nBest supposition: safest path",
+        answer="Approved answer",
+        run_id="run-clarify",
+        source="human",
+    )
+
+    run_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
+    assert "entry=clarification" in run_text
+    assert "source=human" in run_text
+    assert "Approved answer" in run_text
+    session_payload = json.loads(run_paths["session_file"].read_text(encoding="utf-8"))
+    assert "Approved answer" in session_payload["pending_clarification_note"]
+
+
+def test_main_resume_without_session_file_starts_new_conversation_and_logs_notice(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="legacy-run",
+        product_intent="Legacy request",
+        intent_mode="replace",
+    )
+    run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Legacy request")
+    run_paths["session_file"].unlink()
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            "legacy-run",
+            "--resume",
+            "--run-id",
+            "run-20260316T120000Z-abcdef12",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    session_payload = json.loads(run_paths["session_file"].read_text(encoding="utf-8"))
+    assert session_payload["mode"] == "persistent"
+    run_log_text = run_paths["run_log"].read_text(encoding="utf-8")
+    raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
+    assert "new conversation for the next phase" in run_log_text
+    assert "entry=session_recovery" in raw_log_text
+
+
+def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_notice(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="legacy-run",
+        product_intent="Legacy request",
+        intent_mode="replace",
+    )
+    run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Legacy request")
+    run_paths["session_file"].write_text(
+        json.dumps(
+            {
+                "mode": "persistent",
+                "thread_id": None,
+                "pending_clarification_note": None,
+                "created_at": "2026-03-16T12:00:00Z",
+                "last_used_at": "2026-03-16T12:05:00Z",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            "legacy-run",
+            "--resume",
+            "--run-id",
+            "run-20260316T120000Z-abcdef12",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    run_log_text = run_paths["run_log"].read_text(encoding="utf-8")
+    raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
+    assert "new conversation for the next phase" in run_log_text
+    assert "entry=session_recovery" in raw_log_text
+
+
+def test_main_resume_reconstructs_missing_request_from_legacy_context_not_current_task_request(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="legacy-run",
+        product_intent=None,
+        intent_mode="preserve",
+    )
+    paths["legacy_context_file"].write_text(
+        "# Product Context\nLegacy request from original run\n\n### Clarification\nLater clarification",
+        encoding="utf-8",
+    )
+    task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    task_meta["request_text"] = "Newer mutable task request"
+    paths["task_meta_file"].write_text(json.dumps(task_meta, indent=2) + "\n", encoding="utf-8")
+
+    run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Original request")
+    run_paths["request_file"].unlink()
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            "legacy-run",
+            "--resume",
+            "--run-id",
+            "run-20260316T120000Z-abcdef12",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    request_text = run_paths["request_file"].read_text(encoding="utf-8")
+    run_log_text = run_paths["run_log"].read_text(encoding="utf-8")
+    raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
+    assert "Legacy request from original run" in request_text
+    assert "Newer mutable task request" not in request_text
+    assert "entry=request_recovery" in raw_log_text
+    assert "reconstructed from the legacy task context" in run_log_text
