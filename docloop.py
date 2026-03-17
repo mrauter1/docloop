@@ -393,7 +393,7 @@ def resolve_codex_exec_command(model: str) -> List[str]:
 
     help_text = f"{help_result.stdout}\n{help_result.stderr}"
 
-    missing_flags = [flag for flag in ("--full-auto", "--dangerously-bypass-approvals-and-sandbox") if flag not in help_text]
+    missing_flags = [flag for flag in ("--dangerously-bypass-approvals-and-sandbox",) if flag not in help_text]
     if missing_flags:
         fatal(
             "[!] FATAL CODEX ERROR: This Doc-Loop version requires `codex exec` support for: "
@@ -402,9 +402,10 @@ def resolve_codex_exec_command(model: str) -> List[str]:
 
     return [
         "codex",
+        "-c",
+        'model_providers.experimental_ws.wire_api="responses"',
         "exec",
         "--ephemeral",
-        "--full-auto",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         model,

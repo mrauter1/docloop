@@ -472,6 +472,8 @@ def resolve_codex_exec_command(model: str) -> List[str]:
     if supports_bypass:
         return [
             "codex",
+            "-c",
+            'model_providers.experimental_ws.wire_api="responses"',
             "exec",
             "--ephemeral",
             "--dangerously-bypass-approvals-and-sandbox",
