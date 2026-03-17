@@ -235,7 +235,7 @@ def load_instruction_body(workflow: Workflow, relative_paths: list[str]) -> str:
 
 
 def resolve_provider_for_step(config: ReflowConfig, workflow: Workflow, step: AgentStep) -> ProviderProfile:
-    provider_name = step.provider or workflow.default_provider or config.default_provider
+    provider_name = step.provider or workflow.default_provider or config.default_provider or _single_configured_provider(config)
     if not provider_name:
         raise ConfigError(f"agent step {step.name!r} cannot resolve a provider.")
     try:
@@ -297,7 +297,7 @@ def _parse_step(
             provider_name = _require_non_empty_string(provider_name, f"agent step {step_name!r} provider")
             if provider_name not in config.providers:
                 raise ConfigError(f"agent step {step_name!r} references unknown provider {provider_name!r}.")
-        elif workflow_default_provider is None and config.default_provider is None:
+        elif workflow_default_provider is None and config.default_provider is None and _single_configured_provider(config) is None:
             raise ConfigError(f"agent step {step_name!r} cannot resolve a provider.")
         transitions = _parse_transitions(payload.get("transitions"), declared_steps, step_name)
         policy = _parse_policy(workspace, payload.get("policy"), f"agent step {step_name!r}")
@@ -391,7 +391,7 @@ def _parse_declared_entries(workflow_root: Path, payload: object, label: str, en
         if not isinstance(item, dict):
             raise ConfigError(f"{label}[{index}] must be a mapping.")
         _validate_allowed_fields(item, {"path", "as"}, f"{label}[{index}]")
-        path = _validate_workflow_relative_declared_path(workflow_root, item.get("path"), f"{label}[{index}].path")
+        path = _normalize_repo_pattern(item.get("path"), f"{label}[{index}].path")
         as_description = _require_non_empty_string(item.get("as"), f"{label}[{index}].as")
         entries.append(entry_type(path=path, as_description=as_description))
     return entries
@@ -473,13 +473,6 @@ def _validate_workflow_relative_file(workflow_root: Path, value: object, label: 
     return relative
 
 
-def _validate_workflow_relative_declared_path(workflow_root: Path, value: object, label: str) -> str:
-    relative = _normalize_repo_pattern(value, label)
-    target = workflow_root / relative
-    _ensure_path_inside_root(workflow_root, target, label)
-    return relative
-
-
 def _ensure_path_inside_root(root: Path, target: Path, label: str) -> None:
     root_real = root.resolve()
     target_real = target.resolve()
@@ -508,6 +501,122 @@ def _load_yaml_mapping(path: Path, label: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ConfigError(f"{label} must parse to a YAML mapping.")
     return payload
+
+
+def _single_configured_provider(config: ReflowConfig) -> str | None:
+    if len(config.providers) == 1:
+        return next(iter(config.providers))
+    return None
+
+
+def collect_workflow_validation_errors(
+    workspace: Path,
+    workflow_name: str,
+    config: ReflowConfig,
+) -> list[str]:
+    errors: list[str] = []
+    workflow_root = workspace / ".reflow" / "workflows" / workflow_name
+    workflow_path = workflow_root / "workflow.yaml"
+    try:
+        payload = _load_yaml_mapping(workflow_path, f"workflow {workflow_name!r}")
+    except ConfigError as exc:
+        return [str(exc)]
+
+    try:
+        _validate_allowed_fields(payload, WORKFLOW_TOP_LEVEL_FIELDS, f"workflow {workflow_name!r}")
+    except ConfigError as exc:
+        errors.append(str(exc))
+    try:
+        _require_exact_int(payload.get("version"), 1, f"workflow {workflow_name!r} version must be 1.")
+    except ConfigError as exc:
+        errors.append(str(exc))
+
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        errors.append("workflow name must be a non-empty string.")
+    elif name != workflow_name:
+        errors.append("workflow name must exactly match the workflow directory name.")
+
+    task_mode = payload.get("task", "optional")
+    if task_mode not in {"required", "optional", "none"}:
+        errors.append("workflow task must be 'required', 'optional', or 'none'.")
+
+    default_provider = payload.get("default_provider")
+    if default_provider is not None:
+        if not isinstance(default_provider, str) or not default_provider.strip():
+            errors.append("workflow default_provider must be a non-empty string.")
+        elif default_provider not in config.providers:
+            errors.append("workflow default_provider must reference a configured provider.")
+
+    budgets = payload.get("budgets", {})
+    if budgets is not None and not isinstance(budgets, dict):
+        errors.append("workflow budgets must be a mapping when provided.")
+    elif isinstance(budgets, dict):
+        unknown_budget_fields = sorted(set(budgets) - {"max_cycles"})
+        if unknown_budget_fields:
+            errors.append(f"workflow budgets contains unknown fields: {', '.join(unknown_budget_fields)}.")
+        max_cycles = budgets.get("max_cycles")
+        if max_cycles is not None and (not isinstance(max_cycles, int) or max_cycles < 1):
+            errors.append("workflow budgets.max_cycles must be a positive integer.")
+
+    operator_input_payload = payload.get("operator_input", {})
+    if operator_input_payload is not None and not isinstance(operator_input_payload, dict):
+        errors.append("workflow operator_input must be a mapping when provided.")
+    elif isinstance(operator_input_payload, dict):
+        unknown_operator_fields = sorted(set(operator_input_payload) - {"full_auto_instructions", "max_auto_rounds"})
+        if unknown_operator_fields:
+            errors.append(
+                f"workflow operator_input contains unknown fields: {', '.join(unknown_operator_fields)}."
+            )
+        full_auto_instructions = operator_input_payload.get("full_auto_instructions")
+        if full_auto_instructions is not None:
+            try:
+                _validate_workflow_relative_file(
+                    workflow_root,
+                    full_auto_instructions,
+                    "workflow operator_input.full_auto_instructions",
+                )
+            except ConfigError as exc:
+                errors.append(str(exc))
+        max_auto_rounds = operator_input_payload.get("max_auto_rounds", DEFAULT_MAX_AUTO_ROUNDS)
+        if not isinstance(max_auto_rounds, int) or max_auto_rounds < 1:
+            errors.append("workflow operator_input.max_auto_rounds must be a positive integer.")
+
+    steps_payload = payload.get("steps")
+    if not isinstance(steps_payload, dict) or not steps_payload:
+        errors.append("workflow steps must be a non-empty mapping.")
+        return errors
+
+    declared_steps = {name for name in steps_payload if isinstance(name, str)}
+    for step_name, step_payload in steps_payload.items():
+        try:
+            _parse_step(
+                workspace=workspace,
+                workflow_root=workflow_root,
+                workflow_name=workflow_name,
+                step_name=step_name,
+                payload=step_payload,
+                config=config,
+                workflow_default_provider=default_provider if isinstance(default_provider, str) else None,
+                declared_steps=declared_steps,
+            )
+        except ConfigError as exc:
+            errors.append(str(exc))
+
+    entry_value = payload.get("entry")
+    if entry_value is None:
+        entry = next(iter(steps_payload.keys()))
+    elif not isinstance(entry_value, str) or not entry_value.strip():
+        errors.append("workflow entry must be a non-empty string.")
+        entry = None
+    else:
+        entry = entry_value.strip()
+        if entry.startswith("@"):
+            errors.append("workflow entry must not begin with '@'.")
+    if isinstance(entry, str) and entry not in steps_payload:
+        errors.append("workflow entry must reference a declared step.")
+
+    return errors
 
 
 def _validate_allowed_fields(payload: dict[str, object], allowed: set[str], label: str) -> None:

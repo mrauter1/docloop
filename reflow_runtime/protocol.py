@@ -37,7 +37,7 @@ def render_agent_request(
 
     transition_lines = _render_transition_footer(step.transitions)
     context_lines = _render_declared_context_lines(workflow, step, workspace, context_present or {})
-    produces_lines = [f"- expected output: {entry.path} as {entry.as_description}" for entry in step.produces]
+    produces_lines = [f"- expected output: {entry.path} - {entry.as_description}" for entry in step.produces]
 
     footer_parts = [
         "## Reflow Runtime",
@@ -130,9 +130,9 @@ def _render_declared_context_lines(workflow: Workflow, step, workspace: Path, co
     for entry in step.context:
         present = context_present.get(entry.path)
         if present is None:
-            present = (workflow.root / entry.path).exists() or (workspace / entry.path).exists()
+            present = (workspace / entry.path).exists()
         suffix = entry.path if present else f"{entry.path} (not present)"
-        lines.append(f"- context: {suffix} as {entry.as_description}")
+        lines.append(f"- context: {suffix} - {entry.as_description}")
     return lines
 
 

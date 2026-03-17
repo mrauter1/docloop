@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("workflow")
     init_parser.add_argument("--template", default="write-verify", choices=["write-verify", "single-agent"])
     init_parser.add_argument("--provider", default="codex", choices=["codex", "claude"])
-    init_parser.add_argument("--target", default="target.md")
+    init_parser.add_argument("--target", default="document.md")
     init_parser.add_argument("--workspace", default=".")
 
     return parser

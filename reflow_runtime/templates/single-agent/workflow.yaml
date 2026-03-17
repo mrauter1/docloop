@@ -1,0 +1,26 @@
+version: 1
+name: {workflow_name}
+task: required
+
+steps:
+  agent:
+    kind: agent
+    instructions:
+      - shared/base_rules.md
+      - prompts/agent.md
+    max_loops: 20
+    count_toward_cycles: true
+    context:
+      - path: {target}
+        as: "primary file to update"
+      - path: .reflow/context.md
+        as: "source-of-truth requirements and constraints"
+    produces:
+      - path: {target}
+        as: "completed output"
+    transitions:
+      default: retry
+      map:
+        retry: "@retry"
+        done: "@done"
+        blocked: "@blocked"

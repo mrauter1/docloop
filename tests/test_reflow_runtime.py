@@ -86,6 +86,14 @@ elif scenario == "malformed_then_complete":
 else:
     final = "<promise>COMPLETE</promise>\\n"
 
+if scenario == "scaffold_write_verify":
+    if step == "write":
+        final = "<route>verify</route>\\n"
+    elif step == "verify":
+        final = "<route>done</route>\\n"
+    else:
+        final = "<route>done</route>\\n"
+
 final_path.write_text(final, encoding="utf-8")
 sys.stdout.write("fake-codex-stdout\\n")
 """
@@ -926,8 +934,8 @@ def test_render_agent_request_includes_task_context_and_expected_output(tmp_path
         {"target.txt": True},
     )
     assert "- task: Refine the draft" in request
-    assert "- context: target.txt as current draft" in request
-    assert "- expected output: target.txt as updated draft" in request
+    assert "- context: target.txt - current draft" in request
+    assert "- expected output: target.txt - updated draft" in request
 
 
 def test_run_persists_task_and_context_presence_in_iteration_meta(
@@ -948,6 +956,27 @@ def test_run_persists_task_and_context_presence_in_iteration_meta(
     assert "- task: Tighten the document" in request
 
 
+def test_declared_context_presence_is_checked_only_from_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = create_workspace(tmp_path)
+    workflow_root = workspace / ".reflow" / "workflows" / "demo"
+    workflow_path = workflow_root / "workflow.yaml"
+    workflow = _load_yaml(workflow_path)
+    workflow["steps"]["verify"]["context"] = [{"path": "prompts/verify.md", "as": "workflow-local prompt"}]
+    workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{workspace / 'bin'}:{os.environ['PATH']}")
+
+    assert run_new_workflow(workspace, "demo", full_auto=False, task="Check context semantics") == 0
+    store = RunStore(workspace)
+    run_id = next(store.runs_dir.iterdir()).name
+    meta = json.loads((store.run_dir(run_id) / "steps" / "verify" / "001" / "meta.json").read_text(encoding="utf-8"))
+    request = (store.run_dir(run_id) / "steps" / "verify" / "001" / "request.txt").read_text(encoding="utf-8")
+
+    assert meta["context_present"] == {"prompts/verify.md": False}
+    assert "- context: prompts/verify.md (not present) - workflow-local prompt" in request
+
+
 def test_status_verbose_includes_context_and_expected_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
@@ -961,8 +990,8 @@ def test_status_verbose_includes_context_and_expected_output(
     assert status_run(workspace, run_id, verbose=True) == 0
     output = capsys.readouterr().out
     assert "task: Review task" in output
-    assert "context: target.txt | current draft | present" in output
-    assert "expected_output: target.txt | updated draft" in output
+    assert "context: target.txt - current draft" in output
+    assert "expected_output: target.txt - updated draft" in output
 
 
 def test_task_required_without_input_fails_with_usage_message(tmp_path: Path):
@@ -1005,11 +1034,39 @@ def test_validate_command_reports_success_and_failure(
     workspace = create_workspace(tmp_path)
 
     assert validate_workflow(workspace, "demo") == 0
-    assert "Workflow 'demo' is valid." in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Config: ok" in output
+    assert "Workflow 'demo': ok" in output
+    assert "  Steps: verify" in output
+    assert "  Entry: verify" in output
+    assert "  Providers: codex" in output
 
     exit_code = reflow.main(["validate", "missing", "--workspace", str(workspace)])
     assert exit_code == 25
-    assert "missing" in capsys.readouterr().err
+    assert "workflow 'missing' is missing." in capsys.readouterr().out
+
+
+def test_validate_command_reports_multiple_workflow_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    workspace = create_workspace(tmp_path)
+    workflow_path = workspace / ".reflow" / "workflows" / "demo" / "workflow.yaml"
+    workflow = _load_yaml(workflow_path)
+    workflow["steps"]["verify"]["provider"] = "missing"
+    workflow["steps"]["shellfix"] = {
+        "kind": "shell",
+        "cmd": "true",
+        "max_loops": 1,
+        "on_success": "@done",
+        "on_failure": "unknown_step",
+    }
+    workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
+
+    assert validate_workflow(workspace, "demo") == 25
+    output = capsys.readouterr().out
+    assert "Workflow 'demo': FAILED" in output
+    assert "agent step 'verify' references unknown provider 'missing'." in output
+    assert "shell step 'shellfix' on_failure references unknown step 'unknown_step'." in output
 
 
 def test_init_creates_scaffold_and_refuses_existing_workflow(
@@ -1026,11 +1083,20 @@ def test_init_creates_scaffold_and_refuses_existing_workflow(
         target="docs/draft.md",
     ) == 0
     output = capsys.readouterr().out
-    assert "Workflow 'draft' is valid." in output
-    assert "Created:" in output
-    assert (workspace / ".reflow" / "workflows" / "draft" / "workflow.yaml").exists()
+    assert "Workflow 'draft' initialized." in output
+    assert "Created .reflow/config.yaml" in output
+    assert "Created .reflow/context.md" in output
+    assert "Created .reflow/workflows/draft/workflow.yaml" in output
+    assert "Run: reflow run draft \"describe what you want done\"" in output
+    workflow_text = (workspace / ".reflow" / "workflows" / "draft" / "workflow.yaml").read_text(encoding="utf-8")
+    config_text = (workspace / ".reflow" / "config.yaml").read_text(encoding="utf-8")
     assert (workspace / ".reflow" / "context.md").exists()
     assert (workspace / "docs" / "draft.md").exists()
+    assert "entry:" not in workflow_text
+    assert "default: verify" in workflow_text
+    assert "write: write" in workflow_text
+    assert 'model: o4-mini' in config_text
+    assert 'args: ["--full-auto"]' in config_text
 
     with pytest.raises(ValueError):
         init_workflow(
@@ -1042,5 +1108,71 @@ def test_init_creates_scaffold_and_refuses_existing_workflow(
         )
 
 
+def test_init_single_agent_uses_requested_template_defaults(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    assert init_workflow(
+        workspace,
+        "solo",
+        template_name="single-agent",
+        provider_kind="claude",
+        target="document.md",
+    ) == 0
+
+    workflow_text = (workspace / ".reflow" / "workflows" / "solo" / "workflow.yaml").read_text(encoding="utf-8")
+    prompt_text = (workspace / ".reflow" / "workflows" / "solo" / "prompts" / "agent.md").read_text(encoding="utf-8")
+    config_text = (workspace / ".reflow" / "config.yaml").read_text(encoding="utf-8")
+    target_text = (workspace / "document.md").read_text(encoding="utf-8")
+
+    assert "task: required" in workflow_text
+    assert "default: retry" in workflow_text
+    assert "retry: \"@retry\"" in workflow_text
+    assert "<route>done</route>" in prompt_text
+    assert "model: sonnet" in config_text
+    assert "args: []" in config_text
+    assert target_text == "# document\n\nDraft.\n"
+
+
+def test_scaffolded_write_verify_workflow_validates_and_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bin_dir = workspace / "bin"
+    bin_dir.mkdir()
+    make_executable(bin_dir / "codex", FAKE_CODEX)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_SCENARIO", "scaffold_write_verify")
+    monkeypatch.setenv("FAKE_STATE", str(workspace / "fake_state.json"))
+
+    assert init_workflow(
+        workspace,
+        "draft",
+        template_name="write-verify",
+        provider_kind="codex",
+        target="document.md",
+    ) == 0
+    capsys.readouterr()
+
+    assert validate_workflow(workspace, "draft") == 0
+    validate_output = capsys.readouterr().out
+    assert "Workflow 'draft': ok" in validate_output
+    assert "  Entry: write" in validate_output
+    assert "  Providers: codex" in validate_output
+
+    assert run_new_workflow(workspace, "draft", full_auto=False, task="Refine the draft") == 0
+    store = RunStore(workspace)
+    run_id = next(store.runs_dir.iterdir()).name
+    run = store.load_run(run_id)
+    assert run.status == "completed"
+    assert run.step_loops == {"write": 1, "verify": 1}
+
+
 def _load_yaml(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    try:
+        import yaml
+    except ModuleNotFoundError:
+        return json.loads(text)
+    return yaml.safe_load(text)

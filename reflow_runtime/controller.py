@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from .loaders import load_config, load_workflow, resolve_provider_for_step
+from .loaders import collect_workflow_validation_errors, load_config, load_workflow, resolve_provider_for_step
 from .models import (
     AgentStep,
     AwaitingInputError,
@@ -132,10 +132,10 @@ def status_run(workspace: Path, run_id: str, verbose: bool = False) -> int:
                 present = context_present.get(entry.path)
                 if present is None:
                     present = _context_path_exists(workspace, workflow, entry.path)
-                status = "present" if present else "not present"
-                print(f"context: {entry.path} | {entry.as_description} | {status}")
+                suffix = entry.path if present else f"{entry.path} (not present)"
+                print(f"context: {suffix} - {entry.as_description}")
             for entry in step.produces:
-                print(f"expected_output: {entry.path} | {entry.as_description}")
+                print(f"expected_output: {entry.path} - {entry.as_description}")
     return 0
 
 
@@ -158,8 +158,27 @@ def list_runs(workspace: Path) -> int:
 
 def validate_workflow(workspace: Path, workflow_name: str) -> int:
     config = load_config(workspace)
+    print("Config: ok")
+    errors = collect_workflow_validation_errors(workspace, workflow_name, config)
+    if errors:
+        print(f"Workflow '{workflow_name}': FAILED")
+        for error in errors:
+            print(f"  - {error}")
+        return 25
+
     workflow = load_workflow(workspace, workflow_name, config)
-    print(f"Workflow '{workflow.name}' is valid.")
+    providers = sorted(
+        {
+            resolve_provider_for_step(config, workflow, step).name
+            for step in workflow.steps.values()
+            if isinstance(step, AgentStep)
+        }
+    )
+    providers_display = ", ".join(providers)
+    print(f"Workflow '{workflow.name}': ok")
+    print(f"  Steps: {', '.join(workflow.steps)}")
+    print(f"  Entry: {workflow.entry}")
+    print(f"  Providers: {providers_display}")
     return 0
 
 
@@ -178,17 +197,21 @@ def init_workflow(
         provider_kind=provider_kind,
         target=target,
     )
-    validate_workflow(workspace, workflow_name)
-    print("Created:")
+    config = load_config(workspace)
+    errors = collect_workflow_validation_errors(workspace, workflow_name, config)
+    if errors:
+        raise ValueError(f"generated workflow {workflow_name!r} is invalid: {'; '.join(errors)}")
+    print(f"Workflow '{workflow_name}' initialized.")
+    print("")
     for path in result.created:
-        print(f"- {path}")
+        print(f"  Created {path}")
     if result.skipped:
-        print("Skipped:")
         for path in result.skipped:
-            print(f"- {path}")
+            print(f"  Skipped {path} (already exists)")
+    print("")
     print("Next steps:")
-    for step in result.next_steps:
-        print(f"- {step}")
+    for index, step in enumerate(result.next_steps, start=1):
+        print(f"  {index}. {step}")
     return 0
 
 
@@ -741,7 +764,7 @@ def _compute_context_present(workspace: Path, workflow, step: AgentStep) -> dict
 
 
 def _context_path_exists(workspace: Path, workflow, relative_path: str) -> bool:
-    return (workflow.root / relative_path).exists() or (workspace / relative_path).exists()
+    return (workspace / relative_path).exists()
 
 
 def _load_latest_context_present(store: RunStore, run) -> dict[str, bool]:

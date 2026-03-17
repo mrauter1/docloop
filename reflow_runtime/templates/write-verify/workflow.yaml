@@ -1,0 +1,48 @@
+version: 1
+name: {workflow_name}
+task: required
+
+steps:
+  write:
+    kind: agent
+    instructions:
+      - shared/base_rules.md
+      - prompts/write.md
+    max_loops: 20
+    count_toward_cycles: true
+    context:
+      - path: {target}
+        as: "target document to refine"
+      - path: .reflow/context.md
+        as: "source-of-truth requirements and constraints"
+    produces:
+      - path: {target}
+        as: "refined target document"
+    transitions:
+      default: verify
+      map:
+        verify: verify
+        retry: "@retry"
+        done: "@done"
+        blocked: "@blocked"
+
+  verify:
+    kind: agent
+    instructions:
+      - shared/base_rules.md
+      - prompts/verify.md
+    max_loops: 20
+    count_toward_cycles: true
+    context:
+      - path: {target}
+        as: "target document under review"
+      - path: .reflow/context.md
+        as: "source-of-truth requirements and constraints"
+    produces: []
+    transitions:
+      default: write
+      map:
+        write: write
+        done: "@done"
+        retry: "@retry"
+        blocked: "@blocked"
