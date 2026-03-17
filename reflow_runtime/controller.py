@@ -46,7 +46,7 @@ from .storage import RunStore, append_operator_inputs, is_pid_alive
 def run_new_workflow(workspace: Path, workflow_name: str, full_auto: bool, task: str | None = None) -> int:
     config = load_config(workspace)
     workflow = load_workflow(workspace, workflow_name, config)
-    task = _normalize_task_for_workflow(workflow.name, workflow.task_mode, task)
+    task = _normalize_task_for_workflow(workflow.name, workflow.input_mode, task)
     store = RunStore(workspace)
     _refuse_if_active_conflict(store)
     run = store.create_run(workflow.name, list(workflow.steps), workflow.entry, task=task)
@@ -286,8 +286,7 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         context_present,
     )
     ctx = store.reserve_iteration(run, step.name, "agent", request_text=request_text, command_argv=[])
-    policy_ignored_paths = {_relative_path(store.workspace, ctx.iteration_dir)}
-    before = snapshot_workspace(store.workspace, ignored_paths=policy_ignored_paths)
+    before = snapshot_workspace(store.workspace)
     provider = resolve_provider_for_step(config, workflow, step)
     invocation = invoke_provider(
         provider,
@@ -297,11 +296,10 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         ctx.final_path,
         child_pid_callback=_active_child_callback(store, run),
     )
-    after = snapshot_workspace(store.workspace, ignored_paths=policy_ignored_paths)
+    _persist_invocation_outputs(ctx, stdout=invocation.stdout, stderr=invocation.stderr)
+    after = snapshot_workspace(store.workspace)
 
     if invocation.unavailable:
-        ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-        ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
         store.finalize_iteration(
             run,
             ctx,
@@ -319,8 +317,6 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         return None
 
     if invocation.timed_out or invocation.exit_code != 0:
-        ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-        ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
         store.finalize_iteration(
             run,
             ctx,
@@ -340,8 +336,6 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
     try:
         outcome = parse_agent_outcome(ctx.final_path.read_text(encoding="utf-8"), step.transitions)
     except StepFailedError as exc:
-        ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-        ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
         store.finalize_iteration(
             run,
             ctx,
@@ -362,8 +356,6 @@ def _execute_agent_step(store, config, workflow, run, step, *, full_auto: bool, 
         return f"{malformed_control_warning()} ({exc})"
 
     policy_result = evaluate_policy(before, after, step.policy, store.workspace)
-    ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-    ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
     if policy_result.violations:
         store.finalize_iteration(
             run,
@@ -441,8 +433,7 @@ def _execute_shell_step(store, workflow, run, step) -> str | None:
         return None
     command_argv = build_shell_argv(step.cmd)
     ctx = store.reserve_iteration(run, step.name, "shell", command_text=step.cmd, command_argv=command_argv)
-    policy_ignored_paths = {_relative_path(store.workspace, ctx.iteration_dir)}
-    before = snapshot_workspace(store.workspace, ignored_paths=policy_ignored_paths)
+    before = snapshot_workspace(store.workspace)
     env = {
         "REFLOW_RUN_ID": run.run_id,
         "REFLOW_WORKFLOW": workflow.name,
@@ -457,12 +448,10 @@ def _execute_shell_step(store, workflow, run, step) -> str | None:
         env,
         child_pid_callback=_active_child_callback(store, run),
     )
-    after = snapshot_workspace(store.workspace, ignored_paths=policy_ignored_paths)
+    _persist_invocation_outputs(ctx, stdout=invocation.stdout, stderr=invocation.stderr, final=invocation.stdout)
+    after = snapshot_workspace(store.workspace)
 
     if invocation.unavailable:
-        ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-        ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
-        ctx.final_path.write_text(invocation.stdout, encoding="utf-8")
         store.finalize_iteration(
             run,
             ctx,
@@ -480,9 +469,6 @@ def _execute_shell_step(store, workflow, run, step) -> str | None:
         return None
 
     policy_result = evaluate_policy(before, after, step.policy, store.workspace)
-    ctx.stdout_path.write_text(invocation.stdout, encoding="utf-8")
-    ctx.stderr_path.write_text(invocation.stderr, encoding="utf-8")
-    ctx.final_path.write_text(invocation.stdout, encoding="utf-8")
     if policy_result.violations:
         store.finalize_iteration(
             run,
@@ -746,15 +732,15 @@ def _build_full_auto_request(workflow, run, step, questions: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _normalize_task_for_workflow(workflow_name: str, task_mode: str, task: str | None) -> str | None:
+def _normalize_task_for_workflow(workflow_name: str, input_mode: str, task: str | None) -> str | None:
     normalized = task.strip() if isinstance(task, str) else None
     if normalized == "":
         normalized = None
-    if task_mode == "required" and normalized is None:
+    if input_mode == "required" and normalized is None:
         raise ValueError(
             f"workflow '{workflow_name}' requires a task. Usage: reflow run {workflow_name} \"your task description\""
         )
-    if task_mode == "none":
+    if input_mode == "none":
         return None
     return normalized
 
@@ -847,8 +833,11 @@ def _active_child_callback(store: RunStore, run):
     return callback
 
 
-def _relative_path(workspace: Path, path: Path) -> str:
-    return path.relative_to(workspace).as_posix()
+def _persist_invocation_outputs(ctx, *, stdout: str, stderr: str, final: str | None = None) -> None:
+    ctx.stdout_path.write_text(stdout, encoding="utf-8")
+    ctx.stderr_path.write_text(stderr, encoding="utf-8")
+    if final is not None:
+        ctx.final_path.write_text(final, encoding="utf-8")
 
 
 def _signal_active_processes(active: dict[str, object]) -> None:

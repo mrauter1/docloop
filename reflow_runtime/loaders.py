@@ -32,7 +32,7 @@ PROVIDER_FIELDS = {"kind", "command", "model", "timeout_sec", "args", "env"}
 WORKFLOW_TOP_LEVEL_FIELDS = {
     "version",
     "name",
-    "task",
+    "input",
     "entry",
     "steps",
     "default_provider",
@@ -138,6 +138,7 @@ def load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> 
     workflow_path = workflow_root / "workflow.yaml"
     payload = _load_yaml_mapping(workflow_path, f"workflow {workflow_name!r}")
 
+    _raise_if_legacy_workflow_task_field(payload)
     _validate_allowed_fields(payload, WORKFLOW_TOP_LEVEL_FIELDS, f"workflow {workflow_name!r}")
     _require_exact_int(payload.get("version"), 1, f"workflow {workflow_name!r} version must be 1.")
 
@@ -149,8 +150,8 @@ def load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> 
     if not isinstance(steps_payload, dict) or not steps_payload:
         raise ConfigError("workflow steps must be a non-empty mapping.")
 
-    task_mode = payload.get("task", "optional")
-    task_mode = _require_choice(task_mode, {"required", "optional", "none"}, "workflow task")
+    input_mode = payload.get("input", "optional")
+    input_mode = _require_choice(input_mode, {"required", "optional", "none"}, "workflow input")
 
     entry_value = payload.get("entry")
     if entry_value is None:
@@ -214,7 +215,7 @@ def load_workflow(workspace: Path, workflow_name: str, config: ReflowConfig) -> 
         root=workflow_root,
         entry=entry,
         steps=steps,
-        task_mode=task_mode,
+        input_mode=input_mode,
         default_provider=default_provider,
         max_cycles=max_cycles,
         operator_input=WorkflowOperatorInput(
@@ -523,6 +524,11 @@ def collect_workflow_validation_errors(
         return [str(exc)]
 
     try:
+        _raise_if_legacy_workflow_task_field(payload)
+    except ConfigError as exc:
+        return [str(exc)]
+
+    try:
         _validate_allowed_fields(payload, WORKFLOW_TOP_LEVEL_FIELDS, f"workflow {workflow_name!r}")
     except ConfigError as exc:
         errors.append(str(exc))
@@ -537,9 +543,9 @@ def collect_workflow_validation_errors(
     elif name != workflow_name:
         errors.append("workflow name must exactly match the workflow directory name.")
 
-    task_mode = payload.get("task", "optional")
-    if task_mode not in {"required", "optional", "none"}:
-        errors.append("workflow task must be 'required', 'optional', or 'none'.")
+    input_mode = payload.get("input", "optional")
+    if input_mode not in {"required", "optional", "none"}:
+        errors.append("workflow input must be 'required', 'optional', or 'none'.")
 
     default_provider = payload.get("default_provider")
     if default_provider is not None:
@@ -617,6 +623,11 @@ def collect_workflow_validation_errors(
         errors.append("workflow entry must reference a declared step.")
 
     return errors
+
+
+def _raise_if_legacy_workflow_task_field(payload: dict[str, object]) -> None:
+    if "task" in payload:
+        raise ConfigError("workflow field 'task' has been renamed to 'input'")
 
 
 def _validate_allowed_fields(payload: dict[str, object], allowed: set[str], label: str) -> None:

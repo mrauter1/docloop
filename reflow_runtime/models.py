@@ -151,7 +151,7 @@ class Workflow:
     root: Path
     entry: str
     steps: dict[str, Step]
-    task_mode: Literal["required", "optional", "none"]
+    input_mode: Literal["required", "optional", "none"]
     default_provider: str | None
     max_cycles: int | None
     operator_input: WorkflowOperatorInput

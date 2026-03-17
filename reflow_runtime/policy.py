@@ -7,36 +7,35 @@ from pathlib import Path, PurePosixPath
 from .models import PolicyResult, PolicySpec, WorkspaceSnapshot
 
 
-def snapshot_workspace(workspace: Path, ignored_paths: set[str] | None = None) -> WorkspaceSnapshot:
+def snapshot_workspace(workspace: Path) -> WorkspaceSnapshot:
     root = workspace.resolve()
     entries: dict[str, tuple[str, str]] = {}
     escape_paths: set[str] = set()
-    ignored = {path.strip("/") for path in (ignored_paths or set()) if path}
 
     for current_root, dirnames, filenames in os.walk(workspace, topdown=True, followlinks=False):
         current_path = Path(current_root)
         rel_root = current_path.relative_to(workspace)
-        rel_root_str = "" if rel_root == Path(".") else rel_root.as_posix()
-        if _is_ignored(rel_root_str, ignored):
+        if rel_root != Path(".") and _is_runtime_owned(rel_root):
             dirnames[:] = []
             continue
         dirnames[:] = [
             name
             for name in dirnames
-            if not _is_ignored(name if rel_root == Path(".") else (rel_root / name).as_posix(), ignored)
+            if not _is_runtime_owned(Path(name) if rel_root == Path(".") else (rel_root / name))
         ]
 
         for name in sorted(dirnames + filenames):
             path = current_path / name
-            rel_path = name if rel_root == Path(".") else (rel_root / name).as_posix()
-            if not rel_path or _is_ignored(rel_path, ignored):
+            rel_path = Path(name) if rel_root == Path(".") else (rel_root / name)
+            if _is_runtime_owned(rel_path):
                 continue
+            rel_path_str = rel_path.as_posix()
             try:
                 resolved = path.resolve(strict=False)
                 resolved.relative_to(root)
             except ValueError:
-                escape_paths.add(rel_path)
-            entries[rel_path] = _stat_signature(path)
+                escape_paths.add(rel_path_str)
+            entries[rel_path_str] = _stat_signature(path)
     return WorkspaceSnapshot(entries=entries, escape_paths=escape_paths)
 
 
@@ -93,8 +92,5 @@ def _matches_any(path: str, patterns: list[str]) -> bool:
     return any(pure.match(pattern) or path == pattern for pattern in patterns)
 
 
-def _is_ignored(path: str, ignored_paths: set[str]) -> bool:
-    normalized = path.strip("/")
-    if not normalized:
-        return False
-    return any(normalized == ignored or normalized.startswith(f"{ignored}/") for ignored in ignored_paths)
+def _is_runtime_owned(path: Path) -> bool:
+    return bool(path.parts) and path.parts[0] == ".reflow"

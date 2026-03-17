@@ -133,7 +133,7 @@ def create_workspace(tmp_path: Path, *, scenario: str = "simple_complete") -> Pa
     workflow = {
         "version": 1,
         "name": "demo",
-        "task": "optional",
+        "input": "optional",
         "entry": "verify",
         "operator_input": {
             "full_auto_instructions": "prompts/full_auto.md",
@@ -277,21 +277,35 @@ def test_evaluate_policy_ignores_unchanged_escape_symlink(tmp_path: Path):
     assert result.violations == []
 
 
-def test_snapshot_workspace_ignores_configured_paths_and_nested_entries(tmp_path: Path):
+def test_snapshot_workspace_ignores_runtime_owned_paths_and_nested_entries(tmp_path: Path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
     (workspace / "kept.txt").write_text("keep", encoding="utf-8")
-    ignored_dir = workspace / "ignored"
-    ignored_dir.mkdir()
-    (ignored_dir / "nested.txt").write_text("skip", encoding="utf-8")
+    runtime_dir = workspace / ".reflow"
+    runtime_dir.mkdir()
+    (runtime_dir / "nested.txt").write_text("skip", encoding="utf-8")
     outside = tmp_path / "outside.txt"
     outside.write_text("seed", encoding="utf-8")
-    (ignored_dir / "escape").symlink_to(outside)
+    (runtime_dir / "escape").symlink_to(outside)
 
-    snapshot = snapshot_workspace(workspace, ignored_paths={"ignored"})
+    snapshot = snapshot_workspace(workspace)
 
     assert snapshot.entries == {"kept.txt": ("file", snapshot.entries["kept.txt"][1])}
     assert snapshot.escape_paths == set()
+
+
+def test_snapshot_workspace_preserves_top_level_dotpaths(tmp_path: Path):
+    workspace = tmp_path / "repo"
+    (workspace / ".github" / "workflows").mkdir(parents=True)
+    (workspace / ".env").write_text("A=1\n", encoding="utf-8")
+    (workspace / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (workspace / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+
+    snapshot = snapshot_workspace(workspace)
+
+    assert ".env" in snapshot.entries
+    assert ".gitignore" in snapshot.entries
+    assert ".github/workflows/ci.yml" in snapshot.entries
 
 
 def test_evaluate_policy_flags_changed_escape_symlink(tmp_path: Path):
@@ -639,6 +653,154 @@ def test_malformed_control_retries_with_warning_until_success(
     assert "Previous iteration emitted malformed control output." in second_request
 
 
+@pytest.mark.parametrize(
+    ("invocation", "final_text", "expected_result", "expected_failure", "expected_status"),
+    [
+        (InvocationResult(["codex"], "agent-stdout\n", "agent-stderr\n", 20, unavailable=True), "", None, "provider_unavailable", "failed"),
+        (InvocationResult(["codex"], "agent-stdout\n", "agent-stderr\n", 1), "", None, "step_failed", "failed"),
+        (InvocationResult(["codex"], "agent-stdout\n", "agent-stderr\n", 0, timed_out=True), "", None, "step_failed", "failed"),
+        (
+            InvocationResult(["codex"], "agent-stdout\n", "agent-stderr\n", 0),
+            "<questions>\n<question>Broken\n</questions>\n",
+            "warning",
+            None,
+            "running",
+        ),
+        (InvocationResult(["codex"], "agent-stdout\n", "agent-stderr\n", 0), "<promise>COMPLETE</promise>\n", None, None, "completed"),
+    ],
+)
+def test_agent_output_persistence_is_centralized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation: InvocationResult,
+    final_text: str,
+    expected_result: str | None,
+    expected_failure: str | None,
+    expected_status: str,
+):
+    workspace = create_workspace(tmp_path)
+    config = load_config(workspace)
+    workflow = load_workflow(workspace, "demo", config)
+    store = RunStore(workspace)
+    run = store.create_run("demo", list(workflow.steps), "verify")
+    step = workflow.steps["verify"]
+
+    def fake_invoke_provider(_provider, _request_text, _workspace, _iteration_dir, final_path, *, child_pid_callback=None):
+        final_path.write_text(final_text, encoding="utf-8")
+        return invocation
+
+    calls: list[tuple[str, str, str | None]] = []
+    original_persist = controller_module._persist_invocation_outputs
+
+    def recording_persist(ctx, *, stdout: str, stderr: str, final: str | None = None) -> None:
+        calls.append((stdout, stderr, final))
+        original_persist(ctx, stdout=stdout, stderr=stderr, final=final)
+
+    monkeypatch.setattr(controller_module, "invoke_provider", fake_invoke_provider)
+    monkeypatch.setattr(controller_module, "_persist_invocation_outputs", recording_persist)
+
+    result = controller_module._execute_agent_step(
+        store,
+        config,
+        workflow,
+        run,
+        step,
+        full_auto=False,
+        protocol_warning=None,
+    )
+
+    iteration_dir = store.run_dir(run.run_id) / "steps" / "verify" / "001"
+    assert calls == [(invocation.stdout, invocation.stderr, None)]
+    assert (iteration_dir / "stdout.txt").read_text(encoding="utf-8") == invocation.stdout
+    assert (iteration_dir / "stderr.txt").read_text(encoding="utf-8") == invocation.stderr
+
+    if expected_result == "warning":
+        assert result is not None
+    else:
+        assert result == expected_result
+    assert run.status == expected_status
+    assert run.failure_type == expected_failure
+
+
+@pytest.mark.parametrize(
+    ("invocation", "expected_failure", "expected_status"),
+    [
+        (InvocationResult(["/bin/sh"], "shell-stdout\n", "shell-stderr\n", 127, unavailable=True), "internal_error", "failed"),
+        (InvocationResult(["/bin/sh"], "shell-stdout\n", "shell-stderr\n", None, timed_out=True), None, "completed"),
+        (InvocationResult(["/bin/sh"], "shell-stdout\n", "shell-stderr\n", 3), None, "completed"),
+        (InvocationResult(["/bin/sh"], "shell-stdout\n", "shell-stderr\n", 0), None, "completed"),
+    ],
+)
+def test_shell_output_persistence_is_centralized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation: InvocationResult,
+    expected_failure: str | None,
+    expected_status: str,
+):
+    workspace = tmp_path / "workspace"
+    workflow_root = workspace / ".reflow" / "workflows" / "shellflow"
+    workflow_root.mkdir(parents=True)
+    (workspace / ".reflow" / "config.yaml").write_text(
+        _yaml_dump(
+            {
+                "version": 1,
+                "providers": {"codex": {"kind": "codex", "command": "codex"}},
+                "default_provider": "codex",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workflow_root / "workflow.yaml").write_text(
+        _yaml_dump(
+            {
+                "version": 1,
+                "name": "shellflow",
+                "input": "optional",
+                "entry": "check",
+                "steps": {
+                    "check": {
+                        "kind": "shell",
+                        "cmd": "echo ok",
+                        "max_loops": 1,
+                        "on_success": "@done",
+                        "on_failure": "@done",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(workspace)
+    workflow = load_workflow(workspace, "shellflow", config)
+    store = RunStore(workspace)
+    run = store.create_run("shellflow", list(workflow.steps), "check")
+    step = workflow.steps["check"]
+
+    calls: list[tuple[str, str, str | None]] = []
+    original_persist = controller_module._persist_invocation_outputs
+
+    def recording_persist(ctx, *, stdout: str, stderr: str, final: str | None = None) -> None:
+        calls.append((stdout, stderr, final))
+        original_persist(ctx, stdout=stdout, stderr=stderr, final=final)
+
+    monkeypatch.setattr(controller_module, "invoke_shell", lambda *_args, **_kwargs: invocation)
+    monkeypatch.setattr(controller_module, "_persist_invocation_outputs", recording_persist)
+
+    result = controller_module._execute_shell_step(store, workflow, run, step)
+
+    iteration_dir = store.run_dir(run.run_id) / "steps" / "check" / "001"
+    assert calls == [(invocation.stdout, invocation.stderr, invocation.stdout)]
+    assert (iteration_dir / "stdout.txt").read_text(encoding="utf-8") == invocation.stdout
+    assert (iteration_dir / "stderr.txt").read_text(encoding="utf-8") == invocation.stderr
+    assert (iteration_dir / "final.txt").read_text(encoding="utf-8") == invocation.stdout
+
+    assert result is None
+    assert run.status == expected_status
+    assert run.failure_type == expected_failure
+
+
 def test_keyboard_interrupt_stops_run_and_reconciles_reserved_iteration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -763,7 +925,7 @@ def test_stop_signals_recorded_child_pid_before_terminalizing(
     assert recorded == [(2222, controller_module.signal.SIGTERM), (1111, controller_module.signal.SIGTERM)]
 
 
-def test_shell_policy_detects_child_tampering_under_reflow(tmp_path: Path):
+def test_shell_policy_ignores_runtime_owned_writes_under_reflow(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workflow_root = workspace / ".reflow" / "workflows" / "tamper"
     workflow_root.mkdir(parents=True)
@@ -795,12 +957,12 @@ def test_shell_policy_detects_child_tampering_under_reflow(tmp_path: Path):
     (workspace / "target.txt").write_text("seed\n", encoding="utf-8")
     (workflow_root / "workflow.yaml").write_text(_yaml_dump(workflow), encoding="utf-8")
 
-    assert run_new_workflow(workspace, "tamper", full_auto=False) == 21
+    assert run_new_workflow(workspace, "tamper", full_auto=False) == 0
     store = RunStore(workspace)
     run_id = next(store.runs_dir.iterdir()).name
     run = store.load_run(run_id)
-    assert run.status == "failed"
-    assert run.failure_reason == ".reflow/config.yaml: not allowed by allow_write"
+    assert run.status == "completed"
+    assert (workspace / ".reflow" / "config.yaml").read_text(encoding="utf-8") == "tampered\n"
 
 
 def test_shell_policy_ignores_reserved_iteration_transport_artifacts(tmp_path: Path):
@@ -880,7 +1042,7 @@ def test_load_workflow_normalizes_instruction_lists_and_defaults(tmp_path: Path)
     workflow_path = workflow_root / "workflow.yaml"
     workflow = _load_yaml(workflow_path)
     workflow.pop("entry")
-    workflow["task"] = "required"
+    workflow["input"] = "required"
     workflow["steps"]["verify"]["instructions"] = ["shared_skill", "prompts/verify.md"]
     workflow["steps"]["verify"]["transitions"] = {
         "default": "done",
@@ -891,9 +1053,44 @@ def test_load_workflow_normalizes_instruction_lists_and_defaults(tmp_path: Path)
     loaded = load_workflow(workspace, "demo", load_config(workspace))
     step = loaded.steps["verify"]
     assert loaded.entry == "verify"
-    assert loaded.task_mode == "required"
+    assert loaded.input_mode == "required"
     assert step.instructions == ["shared_skill", "prompts/verify.md"]
     assert step.transitions.tag == "route"
+
+
+def test_load_workflow_rejects_legacy_task_field(tmp_path: Path):
+    workspace = create_workspace(tmp_path)
+    workflow_path = workspace / ".reflow" / "workflows" / "demo" / "workflow.yaml"
+    workflow = _load_yaml(workflow_path)
+    workflow["task"] = "required"
+    workflow.pop("input", None)
+    workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="workflow field 'task' has been renamed to 'input'"):
+        load_workflow(workspace, "demo", load_config(workspace))
+
+
+def test_load_workflow_rejects_task_and_input_together(tmp_path: Path):
+    workspace = create_workspace(tmp_path)
+    workflow_path = workspace / ".reflow" / "workflows" / "demo" / "workflow.yaml"
+    workflow = _load_yaml(workflow_path)
+    workflow["task"] = "required"
+    workflow["input"] = "optional"
+    workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="workflow field 'task' has been renamed to 'input'"):
+        load_workflow(workspace, "demo", load_config(workspace))
+
+
+def test_load_workflow_rejects_invalid_input_mode(tmp_path: Path):
+    workspace = create_workspace(tmp_path)
+    workflow_path = workspace / ".reflow" / "workflows" / "demo" / "workflow.yaml"
+    workflow = _load_yaml(workflow_path)
+    workflow["input"] = "sometimes"
+    workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="workflow input"):
+        load_workflow(workspace, "demo", load_config(workspace))
 
 
 def test_load_workflow_rejects_empty_instruction_list(tmp_path: Path):
@@ -994,22 +1191,22 @@ def test_status_verbose_includes_context_and_expected_output(
     assert "expected_output: target.txt - updated draft" in output
 
 
-def test_task_required_without_input_fails_with_usage_message(tmp_path: Path):
+def test_input_required_without_task_text_fails_with_usage_message(tmp_path: Path):
     workspace = create_workspace(tmp_path)
     workflow_path = workspace / ".reflow" / "workflows" / "demo" / "workflow.yaml"
     workflow = _load_yaml(workflow_path)
-    workflow["task"] = "required"
+    workflow["input"] = "required"
     workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
 
     with pytest.raises(ValueError, match='requires a task'):
         run_new_workflow(workspace, "demo", full_auto=False)
 
 
-def test_task_none_ignores_supplied_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_input_none_ignores_supplied_task_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     workspace = create_workspace(tmp_path)
     workflow_path = workspace / ".reflow" / "workflows" / "demo" / "workflow.yaml"
     workflow = _load_yaml(workflow_path)
-    workflow["task"] = "none"
+    workflow["input"] = "none"
     workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
     monkeypatch.setenv("PATH", f"{workspace / 'bin'}:{os.environ['PATH']}")
 
@@ -1069,6 +1266,19 @@ def test_validate_command_reports_multiple_workflow_errors(
     assert "shell step 'shellfix' on_failure references unknown step 'unknown_step'." in output
 
 
+def test_validate_command_reports_task_to_input_rename(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    workspace = create_workspace(tmp_path)
+    workflow_path = workspace / ".reflow" / "workflows" / "demo" / "workflow.yaml"
+    workflow = _load_yaml(workflow_path)
+    workflow["task"] = "required"
+    workflow.pop("input", None)
+    workflow_path.write_text(_yaml_dump(workflow), encoding="utf-8")
+
+    assert validate_workflow(workspace, "demo") == 25
+    output = capsys.readouterr().out
+    assert "workflow field 'task' has been renamed to 'input'" in output
+
+
 def test_init_creates_scaffold_and_refuses_existing_workflow(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
@@ -1125,7 +1335,7 @@ def test_init_single_agent_uses_requested_template_defaults(tmp_path: Path):
     config_text = (workspace / ".reflow" / "config.yaml").read_text(encoding="utf-8")
     target_text = (workspace / "document.md").read_text(encoding="utf-8")
 
-    assert "task: required" in workflow_text
+    assert "input: required" in workflow_text
     assert "default: retry" in workflow_text
     assert "retry: \"@retry\"" in workflow_text
     assert "<route>done</route>" in prompt_text
