@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from .adapters import LLMAdapter
@@ -16,6 +17,22 @@ from .schema import (
 from .types import Command
 
 DEFAULT_MAX_ATTEMPTS = 2
+
+
+@dataclass(frozen=True)
+class _ResolvedStructuredContract:
+    json_schema: dict[str, Any]
+    materialize: Any
+    model_type: type[Any] | None = None
+
+
+@dataclass(frozen=True)
+class _NormalizedCommand:
+    name: str
+    input_contract: _ResolvedStructuredContract
+    executor: Any
+    description: str | None = None
+    output_contract: _ResolvedStructuredContract | None = None
 
 
 async def eval_bool(
@@ -130,7 +147,7 @@ async def dispatch(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     system_prompt: str | None = None,
 ) -> dict[str, Any]:
-    mode, schema, parser = _prepare_dispatch_mode(labels=labels, commands=commands, auto_execute=auto_execute)
+    mode, schema, parser, command_map = _prepare_dispatch_mode(labels=labels, commands=commands, auto_execute=auto_execute)
     instructions = _build_dispatch_instructions(mode=mode, labels=labels, commands=commands)
     decision, attempt_count = await _run_model_operation(
         operation="dispatch",
@@ -146,9 +163,10 @@ async def dispatch(
     if decision["kind"] != "command" or not auto_execute:
         return decision
 
-    command = _normalize_command_definitions(commands or [])[decision["command"]["name"]]
+    command = command_map[decision["command"]["name"]]
+    executor_args = command.input_contract.materialize(decision["command"]["args"])
     try:
-        result = command.executor(decision["command"]["args"])
+        result = command.executor(executor_args)
     except Exception as exc:
         raise FrameworkError(
             operation="dispatch",
@@ -158,9 +176,9 @@ async def dispatch(
             cause=exc,
         ) from exc
 
-    if command.output_schema is not None:
+    if command.output_contract is not None:
         try:
-            validate_json(result, command.output_schema)
+            result = _materialize_structured_value(result, contract=command.output_contract)
         except SchemaValidationError as exc:
             raise FrameworkError(
                 operation="dispatch",
@@ -288,12 +306,80 @@ class DecisionValidationError(Exception):
         self.message = message
 
 
+def _resolve_structured_contract(
+    contract: Any,
+    *,
+    operation: str,
+    label: str,
+    invalid_message: str,
+    unsupported_message: str,
+) -> _ResolvedStructuredContract:
+    if isinstance(contract, Mapping):
+        return _ResolvedStructuredContract(
+            json_schema=_ensure_config_schema(contract, operation=operation, label=label),
+            materialize=lambda payload: payload,
+        )
+
+    if isinstance(contract, type):
+        if not is_supported_model_type(contract):
+            raise FrameworkError(
+                operation=operation,
+                category="unsupported_runtime",
+                message=unsupported_message,
+                attempt_count=0,
+            )
+        try:
+            derived_schema = contract.model_json_schema()
+        except Exception as exc:
+            raise FrameworkError(
+                operation=operation,
+                category="invalid_configuration",
+                message=f"Could not derive schema from model type: {exc}",
+                attempt_count=0,
+                cause=exc,
+            ) from exc
+
+        json_schema = _ensure_config_schema(derived_schema, operation=operation, label=label)
+        return _ResolvedStructuredContract(
+            json_schema=json_schema,
+            materialize=lambda payload: _materialize_model_instance(payload, model_type=contract, json_schema=json_schema),
+            model_type=contract,
+        )
+
+    raise FrameworkError(
+        operation=operation,
+        category="invalid_configuration",
+        message=invalid_message,
+        attempt_count=0,
+    )
+
+
+def _materialize_structured_value(value: Any, *, contract: _ResolvedStructuredContract) -> Any:
+    if contract.model_type is None:
+        validate_json(value, contract.json_schema)
+        return value
+
+    return contract.materialize(value)
+
+
+def _materialize_model_instance(payload: Any, *, model_type: type[Any], json_schema: Mapping[str, Any]) -> Any:
+    if isinstance(payload, model_type):
+        return payload
+    try:
+        validate_json(payload, json_schema)
+        return model_type.model_validate(payload)
+    except SchemaValidationError:
+        raise
+    except Exception as exc:
+        raise SchemaValidationError(str(exc)) from exc
+
+
 def _prepare_dispatch_mode(
     *,
     labels: Sequence[str] | None,
     commands: Sequence[Command | Mapping[str, Any]] | None,
     auto_execute: bool,
-) -> tuple[str, dict[str, Any], Any]:
+) -> tuple[str, dict[str, Any], Any, dict[str, _NormalizedCommand]]:
     if labels is not None and commands is not None:
         raise FrameworkError(
             operation="dispatch",
@@ -334,7 +420,7 @@ def _prepare_dispatch_mode(
                 raise DecisionValidationError("decision_invalid", exc.message) from exc
             return {"kind": "label", "label": payload["label"]}
 
-        return "label", schema, parser
+        return "label", schema, parser, {}
 
     command_map = _normalize_command_definitions(commands or [])
     schema = {
@@ -367,7 +453,7 @@ def _prepare_dispatch_mode(
             raise DecisionValidationError("decision_invalid", f"Unknown command {name!r}")
 
         try:
-            validate_json(payload["command"]["args"], command.input_schema)
+            validate_json(payload["command"]["args"], command.input_contract.json_schema)
         except SchemaValidationError as exc:
             raise DecisionValidationError("command_args_invalid", exc.message) from exc
 
@@ -379,51 +465,21 @@ def _prepare_dispatch_mode(
             },
         }
 
-    return "command", schema, parser
+    return "command", schema, parser, command_map
 
 
 def _normalize_extract_schema(schema: Any) -> tuple[dict[str, Any], Any]:
-    if isinstance(schema, Mapping):
-        output_schema = _ensure_config_schema(schema, operation="extract", label="schema")
-        return output_schema, lambda payload: payload
-
-    if isinstance(schema, type):
-        if not is_supported_model_type(schema):
-            raise FrameworkError(
-                operation="extract",
-                category="unsupported_runtime",
-                message="Model-type extraction requires model_json_schema() and model_validate() support",
-                attempt_count=0,
-            )
-        try:
-            derived_schema = schema.model_json_schema()
-        except Exception as exc:
-            raise FrameworkError(
-                operation="extract",
-                category="invalid_configuration",
-                message=f"Could not derive schema from model type: {exc}",
-                attempt_count=0,
-                cause=exc,
-            ) from exc
-        output_schema = _ensure_config_schema(derived_schema, operation="extract", label="schema")
-
-        def materializer(payload: Any) -> Any:
-            try:
-                return schema.model_validate(payload)
-            except Exception as exc:
-                raise SchemaValidationError(str(exc)) from exc
-
-        return output_schema, materializer
-
-    raise FrameworkError(
+    contract = _resolve_structured_contract(
+        schema,
         operation="extract",
-        category="invalid_configuration",
-        message="schema must be a JSON Schema mapping or supported model type",
-        attempt_count=0,
+        label="schema",
+        invalid_message="schema must be a JSON Schema mapping or supported model type",
+        unsupported_message="Model-type extraction requires model_json_schema() and model_validate() support",
     )
+    return contract.json_schema, contract.materialize
 
 
-def _normalize_command_definitions(commands: Sequence[Command | Mapping[str, Any]]) -> dict[str, Command]:
+def _normalize_command_definitions(commands: Sequence[Command | Mapping[str, Any]]) -> dict[str, _NormalizedCommand]:
     if not commands:
         raise FrameworkError(
             operation="dispatch",
@@ -432,7 +488,7 @@ def _normalize_command_definitions(commands: Sequence[Command | Mapping[str, Any
             attempt_count=0,
         )
 
-    normalized: dict[str, Command] = {}
+    normalized: dict[str, _NormalizedCommand] = {}
     for raw_command in commands:
         if isinstance(raw_command, Command):
             command = raw_command
@@ -476,10 +532,29 @@ def _normalize_command_definitions(commands: Sequence[Command | Mapping[str, Any
                 message=f"command {command.name!r} executor must be callable",
                 attempt_count=0,
             )
-        _ensure_config_schema(command.input_schema, operation="dispatch", label=f"input_schema[{command.name}]")
+        input_contract = _resolve_structured_contract(
+            command.input_schema,
+            operation="dispatch",
+            label=f"input_schema[{command.name}]",
+            invalid_message="command schemas must be JSON Schema mappings or supported model types",
+            unsupported_message="Model-type command schemas require model_json_schema() and model_validate() support",
+        )
+        output_contract = None
         if command.output_schema is not None:
-            _ensure_config_schema(command.output_schema, operation="dispatch", label=f"output_schema[{command.name}]")
-        normalized[command.name] = command
+            output_contract = _resolve_structured_contract(
+                command.output_schema,
+                operation="dispatch",
+                label=f"output_schema[{command.name}]",
+                invalid_message="command schemas must be JSON Schema mappings or supported model types",
+                unsupported_message="Model-type command schemas require model_json_schema() and model_validate() support",
+            )
+        normalized[command.name] = _NormalizedCommand(
+            name=command.name,
+            input_contract=input_contract,
+            executor=command.executor,
+            description=command.description,
+            output_contract=output_contract,
+        )
     return normalized
 
 

@@ -174,6 +174,95 @@ def test_dispatch_validates_command_args_before_execution():
     assert "command_args_invalid" in adapter.requests[1]["instructions"]
 
 
+def test_dispatch_command_input_model_type_materializes_for_executor_only():
+    adapter = FakeAdapter(['{"kind":"command","command":{"name":"send_email","args":{"to":"user@example.com"}}}'])
+    executed = []
+
+    class EmailArgs:
+        def __init__(self, to):
+            self.to = to
+
+        @classmethod
+        def model_json_schema(cls):
+            return {
+                "type": "object",
+                "properties": {"to": {"type": "string", "pattern": ".+@.+"}},
+                "required": ["to"],
+                "additionalProperties": False,
+            }
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(to=payload["to"])
+
+    result = asyncio.run(
+        dispatch(
+            adapter=adapter,
+            model="gpt-test",
+            context={"intent": "notify"},
+            commands=[
+                Command(
+                    name="send_email",
+                    input_schema=EmailArgs,
+                    executor=lambda args: executed.append(args) or {"status": "sent"},
+                )
+            ],
+            auto_execute=True,
+        )
+    )
+
+    assert result["decision"]["command"]["args"] == {"to": "user@example.com"}
+    assert len(executed) == 1
+    assert isinstance(executed[0], EmailArgs)
+    assert executed[0].to == "user@example.com"
+
+
+def test_dispatch_command_output_model_type_returns_model_instance():
+    adapter = FakeAdapter(['{"kind":"command","command":{"name":"compute","args":{}}}'])
+
+    class ComputeResult:
+        def __init__(self, ok, code):
+            self.ok = ok
+            self.code = code
+
+        @classmethod
+        def model_json_schema(cls):
+            return {
+                "type": "object",
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "code": {"type": "integer"},
+                },
+                "required": ["ok", "code"],
+                "additionalProperties": False,
+            }
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(ok=payload["ok"], code=payload["code"])
+
+    result = asyncio.run(
+        dispatch(
+            adapter=adapter,
+            model="gpt-test",
+            context={"intent": "compute"},
+            commands=[
+                Command(
+                    name="compute",
+                    input_schema={"type": "object", "additionalProperties": False},
+                    output_schema=ComputeResult,
+                    executor=lambda args: {"ok": True, "code": 200},
+                )
+            ],
+            auto_execute=True,
+        )
+    )
+
+    assert isinstance(result["result"], ComputeResult)
+    assert result["result"].ok is True
+    assert result["result"].code == 200
+
+
 def test_dispatch_label_mode_returns_decision_shape():
     adapter = FakeAdapter(['{"kind":"label","label":"archive"}'])
 
@@ -410,6 +499,34 @@ def test_dispatch_rejects_invalid_regex_schema_before_provider_call():
 
     exc = exc_info.value
     assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
+
+
+def test_dispatch_rejects_unsupported_command_model_type_before_provider_call():
+    adapter = FakeAdapter([])
+
+    class Unsupported:
+        pass
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            dispatch(
+                adapter=adapter,
+                model="gpt-test",
+                context={"intent": "send"},
+                commands=[
+                    Command(
+                        name="send_email",
+                        input_schema=Unsupported,
+                        executor=lambda args: {"ok": True},
+                    )
+                ],
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "unsupported_runtime"
     assert exc.attempt_count == 0
     assert adapter.requests == []
 

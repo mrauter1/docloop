@@ -96,7 +96,9 @@ Extracts structured output that conforms to:
 Chooses one action from a closed menu:
 - **label path**: returns a `DispatchDecision(kind="label")`,
 - **command path**: returns a `DispatchDecision(kind="command")`,
-- with `auto_execute=True`, executes selected command and returns `DispatchExecution`.
+- with `auto_execute=True`, executes the selected command and returns `DispatchExecution`.
+
+For command mode, `input_schema` and `output_schema` may be either JSON Schema mappings or supported model types. The public dispatch decision remains JSON-shaped; model materialization happens at the executor/output boundary.
 
 ## Dispatch Interface Types
 - **`Command`**: named command with input schema, executor, optional description, optional output schema.

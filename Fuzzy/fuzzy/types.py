@@ -4,10 +4,13 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 
+StructuredContract = Mapping[str, Any] | type[Any]
+
+
 @dataclass(frozen=True)
 class Command:
     name: str
-    input_schema: Mapping[str, Any]
-    executor: Callable[[dict[str, Any]], Any]
+    input_schema: StructuredContract
+    executor: Callable[[Any], Any]
     description: str | None = None
-    output_schema: Mapping[str, Any] | None = None
+    output_schema: StructuredContract | None = None

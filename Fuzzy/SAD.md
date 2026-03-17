@@ -130,18 +130,21 @@ Rules:
 ### 5.4 Command Definition
 A command definition MUST include:
 - `name`: unique identifier within one dispatch call,
-- `input_schema`: JSON Schema mapping used to validate model-selected arguments,
+- `input_schema`: either a JSON Schema mapping or a supported model type used to validate model-selected arguments,
 - `executor`: callable invoked only when `auto_execute=True`.
 
 A command definition MAY include:
 - `description`: natural-language routing hint for the model,
-- `output_schema`: JSON Schema mapping for validating executor output.
+- `output_schema`: either a JSON Schema mapping or a supported model type for validating executor output.
 
 If `output_schema` is supplied, executor output MUST validate against it before the framework returns a `DispatchExecution`.
 
 Rules:
-- `input_schema` and `output_schema` use the same JSON Schema contract defined in Section 5.2 for mapping-based schemas.
-- Command schemas are JSON-Schema-only. Model-type inputs that are allowed for `extract` are not part of the `dispatch` command contract unless a future revision adds them explicitly.
+- Mapping-based `input_schema` and `output_schema` use the same JSON Schema contract defined in Section 5.2.
+- Model-type `input_schema` and `output_schema` use the same supported model-type contract defined in Section 5.2.
+- Model-selected command arguments MUST remain JSON objects in the public dispatch decision shape.
+- When `input_schema` is a supported model type, the executor MUST receive the validated model instance rather than the raw args mapping.
+- When `output_schema` is a supported model type, the framework MUST validate the executor result against that model contract and return the materialized model instance in `DispatchExecution.result`.
 
 ### 5.5 Public Error Contract
 Primitive calls and `LLMOps` factory entrypoints MUST raise framework-specific error objects rather than bare generic exceptions for the failure categories covered by this document.
@@ -281,6 +284,7 @@ Validation contract:
 - Label mode returns `DispatchDecision` with `kind="label"`.
 - Command mode returns `DispatchDecision` with `kind="command"` unless `auto_execute=True`.
 - When `auto_execute=True`, the framework MUST validate selected args, execute the chosen command exactly once, validate executor output when `output_schema` is present, and return `DispatchExecution`.
+- When `input_schema` is a supported model type, the returned decision MUST still preserve JSON-shaped `command.args`; model materialization applies only at the executor boundary.
 
 Failure contract:
 - Duplicate labels or duplicate command names MUST fail before provider call.
