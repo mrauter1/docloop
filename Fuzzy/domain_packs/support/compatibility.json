@@ -1,0 +1,10 @@
+{
+  "name": "fuzzy-support",
+  "core_version": ">=0.1.0",
+  "exports": [
+    "fuzzy_support.recipes"
+  ],
+  "eval_suites": [
+    "evals/support_triage_suite.json"
+  ]
+}

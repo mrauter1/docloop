@@ -1,0 +1,4 @@
+# Test Author ↔ Test Auditor Feedback
+
+- 2026-03-17 test-author: Confirmed Release A coverage in `tests/test_fuzzy.py` for `context` shorthand, `messages` ordering, exactly-one-of validation, unsupported message-shape failures, adapter payload mapping, and in-scope regression behavior. Added an explicit edge-case test for `context=None` counting as the chosen evidence surface, and documented the full behavior-to-test map plus flake controls in `test_strategy.md`.
+- TST-001 | non-blocking | Audit complete with no blocking gaps found. The Release A contract changes are covered by deterministic unit tests for `context` shorthand, explicit `messages`, exactly-one-of failures, unsupported message shapes, adapter payload mapping, and the `context=None` boundary case, and `test_strategy.md` accurately maps those behaviors with clear flake controls.

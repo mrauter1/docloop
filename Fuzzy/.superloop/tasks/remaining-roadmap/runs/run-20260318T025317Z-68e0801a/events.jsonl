@@ -1,0 +1,9 @@
+{"ts": "2026-03-18T02:53:17.498332+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 1, "event_type": "run_started", "workspace": "/home/marcelo/code/docloop/Fuzzy", "pairs": ["plan", "implement", "test"], "max_iterations": 15, "use_git": false, "task_id": "remaining-roadmap", "task_root": ".superloop/tasks/remaining-roadmap"}
+{"ts": "2026-03-18T02:53:17.498436+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 2, "event_type": "pair_started", "pair": "plan"}
+{"ts": "2026-03-18T02:53:17.498457+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T02:56:23.320382+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 4, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T02:57:28.077110+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 5, "event_type": "phase_finished", "pair": "plan", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T02:57:28.077531+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 6, "event_type": "pair_completed", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T02:57:28.077747+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 7, "event_type": "pair_started", "pair": "implement"}
+{"ts": "2026-03-18T02:57:28.077791+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 8, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T03:06:02.499211+00:00", "run_id": "run-20260318T025317Z-68e0801a", "seq": 9, "event_type": "run_finished", "status": "interrupted", "exit_code": 130}

@@ -1,0 +1,10 @@
+{
+  "name": "fuzzy-pack-template",
+  "core_version": ">=0.1.0",
+  "exports": [
+    "fuzzy_pack_template.recipes"
+  ],
+  "eval_suites": [
+    "evals/template_suite.json"
+  ]
+}

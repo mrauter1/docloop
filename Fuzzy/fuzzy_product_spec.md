@@ -20,10 +20,12 @@ The target outcome is not "more AI features." The target outcome is that teams c
 
 - Constrained primitives over open-ended prompting.
 - Typed return values over prose.
+- Explicit instruction/evidence boundaries over hidden normalization.
 - Local validation over provider trust.
 - Bounded retries over opaque agent loops.
 - Stateless library ergonomics over platform lock-in.
 - Provider abstraction over provider-specific app architecture.
+- `system_prompt` as the simple, standard top-level instruction surface.
 
 ### Add
 
@@ -54,9 +56,9 @@ That is useful, but many teams will still not adopt it because they must build t
 
 - authoring schemas,
 - defining command contracts,
+- structuring evidence cleanly across text, records, and conversation history,
 - evaluating prompt/model changes,
 - collecting traces and failure diagnostics,
-- normalizing messy inputs,
 - packaging domain-specific patterns for repeated use.
 
 The 10x opportunity is to eliminate that surrounding friction without changing the core philosophy.
@@ -329,7 +331,7 @@ Context:
 - A fintech onboarding system receives messy OCR text and user-entered fields.
 
 Fuzzy flow:
-- deterministic preprocessing redacts secrets and trims noise,
+- caller-side cleanup redacts secrets and trims noise if needed,
 - `extract` identity fields into a validated schema,
 - `eval_bool` "submitted package is complete enough for manual review,"
 - `dispatch` to `request_missing_documents` or `advance_to_analyst_queue`.
@@ -341,14 +343,14 @@ Why Fuzzy is right:
 
 Fuzzy should grow in four layers:
 
-1. Core primitives
-Keep the current model stable.
+1. Core primitives and input contract
+Keep the four primitives stable and make `system_prompt`, `context`, and `messages` boundaries explicit.
 
 2. Reliability tooling
-Add tracing, evals, and better preprocessing.
+Add tracing, evals, and better debugging.
 
 3. Integration ergonomics
-Add helpers for commands, schemas, and adapters.
+Add helpers for schemas, commands, messages, and adapters.
 
 4. Domain recipes
 Package common production patterns on top of the core.
@@ -357,144 +359,73 @@ This preserves ethos because the center remains small and explicit, while option
 
 ## 9. Prioritized Roadmap
 
-### Phase 1: Immediate Utility Multipliers
-
-#### 1. `fuzzy.recipes`
+### Phase 1: Adoptability First
 
 Goal:
-- Ship reusable production patterns built on current primitives.
+- Make Fuzzy the easiest way to add one safe LLM decision to an existing Python service.
 
-Initial recipes:
-- support triage,
-- lead qualification,
-- document completeness,
-- policy gate,
-- constrained approval router.
+Ship:
+- stable public primitive signatures,
+- explicit input contract around `system_prompt`, `context`, and `messages`,
+- docs overhaul and quickstarts,
+- command ergonomics,
+- schema ergonomics,
+- test doubles and fixture-driven local testing.
 
 Why first:
-- Highest utility per unit of implementation.
-- Demonstrates value using the existing API.
+- Adoption is blocked more by input ambiguity, schema friction, and command setup than by missing breadth.
 
-#### 2. `fuzzy.trace`
-
-Goal:
-- Provide optional structured trace output per call.
-
-Trace contents:
-- request metadata,
-- attempt count,
-- final raw text,
-- validation errors per attempt,
-- provider response IDs,
-- normalized schema metadata.
-
-Why first:
-- Needed for debugging, tuning, and trust.
-
-#### 3. `fuzzy.evals`
+### Phase 2: Trust Layer
 
 Goal:
-- Make prompt/model iteration measurable.
+- Make Fuzzy production-credible by default.
 
-Capabilities:
-- fixture-driven tests,
-- prompt variants,
-- model comparisons,
-- label accuracy,
-- extraction validity rate,
-- retry rate and exhaustion rate.
+Ship:
+- `fuzzy.trace`,
+- `fuzzy.evals`,
+- regression tooling for CI,
+- local debugging workflows.
 
-Why first:
-- Moves Fuzzy from "library" to "operationally credible library."
+Why second:
+- Users trust narrow systems that are inspectable and measurable.
 
-#### 4. `fuzzy.preprocess`
+### Phase 3: Flagship Utility
 
 Goal:
-- Expand deterministic local helpers.
+- Solve common operational workflows out of the box without hiding the core.
 
-Examples:
-- `drop_large_fields`,
-- `redact_patterns`,
-- `truncate_text`,
-- `normalize_whitespace`,
-- `pick_fields`.
+Ship:
+- `fuzzy.recipes`,
+- 3-4 flagship recipes,
+- reference service integrations.
 
-Why first:
-- Improves cost, consistency, and safety without touching the LLM contract.
+Why third:
+- Product utility compounds once teams can see their own workflow mirrored in first-party examples.
 
-### Phase 2: Broaden Adoption Without Bloat
-
-#### 5. More first-party adapters
-
-Targets:
-- Anthropic,
-- Azure OpenAI,
-- Google,
-- local OpenAI-compatible endpoints.
-
-Why:
-- Increases addressable adoption while preserving the current abstraction.
-
-#### 6. Command ergonomics
+### Phase 4: Portability And Scale
 
 Goal:
-- Make `dispatch` dramatically easier to use.
+- Expand addressable adoption without changing the abstraction.
 
-Features:
-- command decorator,
-- command registry,
-- schema inference where safe,
-- command validation helpers,
-- registry docs generation.
-
-Why:
-- `dispatch` is one of the most powerful primitives but also one of the most setup-heavy.
-
-#### 7. Better model contract support
-
-Goal:
-- Expand beyond raw JSON Schema authoring.
-
-Features:
-- first-class Pydantic integration,
-- dataclass-to-schema helper,
-- TypedDict helper,
-- schema builder utilities.
-
-Why:
-- Schema friction is a top adoption barrier.
-
-### Phase 3: Strategic Extensions
-
-#### 8. Domain packs
-
-Examples:
-- `fuzzy-support`
-- `fuzzy-crm`
-- `fuzzy-compliance`
-- `fuzzy-intake`
-
-Each pack includes:
-- recipe wrappers,
-- prompts,
-- schemas,
-- command definitions,
-- eval fixtures.
-
-Why:
-- Captures real product value without bloating the core package.
-
-#### 9. Batch execution and runtime policies
-
-Features:
-- bulk classify/extract,
-- concurrency controls,
+Ship:
+- more first-party adapters,
+- batch execution,
 - fallback model policies,
-- retry metrics,
-- cost accounting hooks.
+- approval and audit hooks,
+- runtime cost controls.
 
-Why:
-- Important for high-volume production workloads.
+Why fourth:
+- Adapter sprawl and scale features matter after the product is easy to adopt and easy to trust.
+
+### Phase 5: Ecosystem Expansion
+
+Goal:
+- Capture repeat use cases without bloating the core package.
+
+Ship:
+- optional domain packs,
+- pack templates,
+- eval-backed contribution standards.
 
 ## 10. API Direction
 
@@ -506,7 +437,10 @@ The API should remain explicit. Helpers should reduce repetition, not hide the d
 result = await fuzzy.classify(
     adapter=adapter,
     model="gpt-5.4-mini",
-    context=context,
+    messages=[
+        {"role": "user", "parts": [{"type": "text", "text": inbound_message}]},
+        {"role": "user", "parts": [{"type": "json", "data": account_metadata}]},
+    ],
     labels=["low", "medium", "high"],
     trace=True,
 )
@@ -524,7 +458,40 @@ value, trace = await fuzzy.classify(..., return_trace=True)
 Recommendation:
 - Prefer `return_trace=True` for minimal disruption to the current contract.
 
-### B. Recipe modules
+### B. Input model
+
+```python
+result = await fuzzy.extract(
+    adapter=adapter,
+    model="gpt-5.4-mini",
+    system_prompt="Extract a validated refund claim.",
+    messages=[
+        {"role": "user", "parts": [{"type": "text", "text": ticket.body}]},
+        {"role": "user", "parts": [{"type": "json", "data": account_state}]},
+    ],
+    schema=RefundClaimSchema,
+)
+```
+
+Simple shorthand:
+
+```python
+result = await fuzzy.extract(
+    adapter=adapter,
+    model="gpt-5.4-mini",
+    system_prompt="Extract a validated refund claim.",
+    context={"ticket": ticket.body, "account": account_state},
+    schema=RefundClaimSchema,
+)
+```
+
+Recommendation:
+- `messages` is the primary advanced input surface.
+- `context` remains a shorthand for simple cases.
+- `context` and `messages` are mutually exclusive.
+- `system_prompt` remains the standard top-level instruction surface.
+
+### C. Recipe modules
 
 ```python
 from fuzzy.recipes.support import triage_ticket
@@ -554,7 +521,7 @@ Returned shape:
 }
 ```
 
-### C. Command decorator
+### D. Command decorator
 
 ```python
 from fuzzy.commands import command
@@ -574,13 +541,13 @@ Use in dispatch:
 decision = await fuzzy.dispatch(
     adapter=adapter,
     model=model,
-    context=context,
+    messages=messages,
     commands=[open_refund_review_case, request_invoice_id],
     auto_execute=False,
 )
 ```
 
-### D. Evals API
+### E. Evals API
 
 ```python
 from fuzzy.evals import ClassificationCase, run_classification_eval
@@ -592,7 +559,9 @@ report = await run_classification_eval(
     cases=[
         ClassificationCase(
             name="duplicate charge",
-            context={"message": "I was billed twice"},
+            messages=[
+                {"role": "user", "parts": [{"type": "text", "text": "I was billed twice"}]},
+            ],
             expected="billing",
         ),
     ],
@@ -610,19 +579,29 @@ Report shape:
 }
 ```
 
-### E. Preprocess pipeline
+### F. Future multimodal direction
 
 ```python
-from fuzzy.preprocess import compose, drop_large_fields, redact_patterns, truncate_text
-
-clean_context = compose(
-    drop_large_fields(max_chars=4000),
-    redact_patterns([r"\\b\\d{16}\\b"]),
-    truncate_text(max_chars=6000),
-)(raw_context)
+decision = await fuzzy.extract(
+    adapter=adapter,
+    model="gpt-5.4-mini",
+    system_prompt="Extract receipt fields for review.",
+    messages=[
+        {
+            "role": "user",
+            "parts": [
+                {"type": "text", "text": "Review this receipt image."},
+                {"type": "image", "source": receipt_image},
+            ],
+        },
+    ],
+    schema=ReceiptSchema,
+)
 ```
 
-### F. Domain pack structure
+This is illustrative of the intended direction: the public input surface should be able to grow to image and video inputs without forcing everything through a JSON-only context model.
+
+### G. Domain pack structure
 
 ```python
 from fuzzy_support import triage_ticket, SupportTicketSchema
@@ -681,7 +660,7 @@ Outputs:
 - next-step command.
 
 Primitive composition:
-- deterministic preprocess,
+- caller-side cleanup only if needed,
 - `extract` for observed fields,
 - `eval_bool` for completeness policy,
 - `dispatch` for follow-up action.
@@ -710,10 +689,10 @@ Primitive composition:
 Contains:
 - primitives,
 - adapters,
+- message/input contracts,
 - schemas/contracts,
 - errors,
 - trace hooks,
-- preprocess helpers,
 - eval framework.
 
 ### Optional packages
@@ -829,10 +808,31 @@ That distinction is strategic. Fuzzy becomes more valuable by deepening its nich
 ### Release 1
 
 Ship:
+- typed input contract around `system_prompt`, `context`, and `messages`
+- docs overhaul and quickstarts
+- schema helpers
+- command decorators and registry
+- local testing helpers
+
+Reason:
+- This removes the biggest first-use friction and makes the API boundary obvious.
+
+### Release 2
+
+Ship:
 - `fuzzy.trace`
-- `fuzzy.preprocess`
 - `fuzzy.evals`
+- regression and CI helpers
+- local trace viewing
+
+Reason:
+- This makes Fuzzy production-credible and inspectable.
+
+### Release 3
+
+Ship:
 - 3 flagship recipes
+- reference service integrations
 
 Flagship recipes:
 - support triage,
@@ -840,31 +840,12 @@ Flagship recipes:
 - document completeness.
 
 Reason:
-- This produces the largest jump in real-world utility while keeping the architecture coherent.
-
-### Release 2
-
-Ship:
-- command decorators and registry,
-- 2-3 new adapters,
-- schema helpers.
-
-Reason:
-- This reduces the biggest API friction points for deeper adoption.
-
-### Release 3
-
-Ship:
-- one or two optional domain packs,
-- batch/runtime policy features.
-
-Reason:
-- This expands scale and repeatability after the core workflow is proven.
+- This turns the core into a repeatable adoption path for real workflows.
 
 ## 17. Summary
 
 Fuzzy can 10x its utility by becoming easier to adopt, easier to debug, easier to evaluate, and easier to apply to common production decision problems.
 
-The winning move is not to add more autonomy.
+The winning move is not to add more autonomy or more hidden normalization.
 
-The winning move is to make constrained LLM decisioning so reliable and ergonomic that teams default to Fuzzy whenever a model output must safely drive code.
+The winning move is to make constrained LLM decisioning so reliable, explicit, and ergonomic that teams default to Fuzzy whenever a model output must safely drive code.

@@ -11,6 +11,7 @@ class FrameworkError(Exception):
         attempt_count: int,
         final_validation_category: str | None = None,
         cause: Exception | None = None,
+        trace=None,
     ) -> None:
         super().__init__(message)
         self.operation = operation
@@ -18,6 +19,7 @@ class FrameworkError(Exception):
         self.message = message
         self.attempt_count = attempt_count
         self.final_validation_category = final_validation_category
+        self.trace = trace
         self.__cause__ = cause
 
     def __str__(self) -> str:

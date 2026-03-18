@@ -1,0 +1,18 @@
+{
+  "name": "support-pack-suite",
+  "task": "classification",
+  "cases": [
+    {
+      "name": "billing-case",
+      "context": {
+        "subject": "Refund request",
+        "body": "I was charged twice."
+      },
+      "expected": "billing",
+      "tags": [
+        "pack",
+        "support"
+      ]
+    }
+  ]
+}

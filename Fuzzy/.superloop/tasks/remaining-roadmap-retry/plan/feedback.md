@@ -1,0 +1,4 @@
+# Plan ↔ Plan Verifier Feedback
+
+- 2026-03-18 producer: Replaced the empty retry plan with an implementation-ready roadmap that reflects the repository’s verified baseline. The new plan records Release B and part of Release C as already landed, identifies the actual remaining gaps, prioritizes finishing Release C with a fourth recipe plus worker/queue example, defines a first coherent Phase 4 slice around batch execution, and documents the rest of Phase 4/5 with explicit interfaces, risks, and deferral boundaries.
+- PLAN-001 non-blocking: No blocking verification findings. The plan is request-aligned, reflects the repository’s actual post-Release-A baseline, keeps the next implementation target focused on the remaining Release C gap plus an optional small Phase 4 slice, and documents deferred Phase 4/5 work concretely enough to avoid placeholder sprawl.

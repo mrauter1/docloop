@@ -1,0 +1,20 @@
+{"ts": "2026-03-18T13:58:18.373830+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 1, "event_type": "run_started", "workspace": "/home/marcelo/code/docloop/Fuzzy", "pairs": ["plan", "implement", "test"], "max_iterations": 15, "use_git": false, "task_id": "remaining-deferrals", "task_root": ".superloop/tasks/remaining-deferrals"}
+{"ts": "2026-03-18T13:58:18.373944+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 2, "event_type": "pair_started", "pair": "plan"}
+{"ts": "2026-03-18T13:58:18.373965+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T14:02:15.265244+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 4, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:04:32.379577+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 5, "event_type": "phase_finished", "pair": "plan", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:04:32.380114+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 6, "event_type": "pair_completed", "pair": "plan", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T14:04:32.380307+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 7, "event_type": "pair_started", "pair": "implement"}
+{"ts": "2026-03-18T14:04:32.380355+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 8, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T14:16:11.570730+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 9, "event_type": "phase_finished", "pair": "implement", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:19:31.696444+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 10, "event_type": "phase_finished", "pair": "implement", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:19:33.700416+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 11, "event_type": "cycle_started", "pair": "implement", "cycle": 2, "attempt": 1}
+{"ts": "2026-03-18T14:22:22.726764+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 12, "event_type": "phase_finished", "pair": "implement", "phase": "producer", "cycle": 2, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:24:04.653478+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 13, "event_type": "phase_finished", "pair": "implement", "phase": "verifier", "cycle": 2, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:24:04.657290+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 14, "event_type": "pair_completed", "pair": "implement", "cycle": 2, "attempt": 1}
+{"ts": "2026-03-18T14:24:04.657858+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 15, "event_type": "pair_started", "pair": "test"}
+{"ts": "2026-03-18T14:24:04.658067+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 16, "event_type": "cycle_started", "pair": "test", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T14:27:06.177077+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 17, "event_type": "phase_finished", "pair": "test", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:29:25.137387+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 18, "event_type": "phase_finished", "pair": "test", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false}
+{"ts": "2026-03-18T14:29:25.138286+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 19, "event_type": "pair_completed", "pair": "test", "cycle": 1, "attempt": 1}
+{"ts": "2026-03-18T14:29:25.138410+00:00", "run_id": "run-20260318T135818Z-74ec8513", "seq": 20, "event_type": "run_finished", "status": "success", "exit_code": 0}

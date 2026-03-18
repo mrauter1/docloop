@@ -3,12 +3,13 @@
 ## 1. Purpose and Scope
 Fuzzy is a framework for turning LLM output into validated application decisions and structured data that downstream code can consume without free-form parsing.
 
-The framework standardizes four LLM-backed primitives and one local preprocessing helper:
-- `drop`: deterministic context pruning/sanitization with no model call,
+The framework standardizes four LLM-backed primitives, one convenience wrapper, and one explicit input boundary:
 - `eval_bool`: validated boolean evaluation,
 - `classify`: single-label classification from a closed set,
 - `extract`: schema-constrained structured extraction,
-- `dispatch`: constrained selection of either a label or a command from a closed menu.
+- `dispatch`: constrained selection of either a label or a command from a closed menu,
+- `LLMOps`: convenience facade for shared defaults,
+- `system_prompt` plus exactly one of `context` or `messages` as the caller-facing evidence surface.
 
 This document defines the externally relevant architecture and contracts required for a conforming implementation. It does not mandate one internal code structure, prompt template, or retry algorithm beyond the observable behavior stated here.
 
@@ -19,7 +20,7 @@ This document defines the externally relevant architecture and contracts require
 - Constrain model output through finite choices or explicit schemas.
 - Hide provider-specific request/response details behind a stable adapter contract.
 - Recover from malformed or schema-invalid model output through bounded repair/retry.
-- Treat caller context as data, not instructions.
+- Treat caller evidence as data, not instructions.
 - Support both async-first usage and sync wrappers with identical semantics.
 
 ### 2.2 Non-Goals
@@ -31,9 +32,9 @@ This document defines the externally relevant architecture and contracts require
 ## 3. System Context
 A conforming deployment contains these logical components:
 
-- Caller application: supplies adapter, model, context, and operation-specific constraints.
+- Caller application: supplies adapter, model, `system_prompt`, exactly one of `context` or `messages`, and operation-specific constraints.
 - `LLMOps`: convenience facade that stores defaults and exposes the public methods.
-- Core primitives: implement normalization, validation, repair/retry, and typed return conversion.
+- Core primitives: implement input validation, provider request assembly, output validation, repair/retry, and typed return conversion.
 - `LLMAdapter`: provider abstraction used by primitives.
 - Provider backend: an external LLM service such as OpenAI Responses API or OpenRouter.
 - Optional command executor functions: caller-supplied side-effecting or pure functions used by `dispatch` in command mode.
@@ -42,11 +43,17 @@ Fuzzy is logically stateless across calls. The framework may keep in-memory conf
 
 ## 4. Common Architectural Rules
 
-### 4.1 Context Handling
-- Context supplied to an LLM-backed primitive is application data, not executable instruction text.
-- The implementation MUST serialize context into a deterministic data envelope before sending it to the model.
-- The exact internal envelope keys are not part of the public contract, but the envelope MUST preserve the caller-supplied data structure and MUST separate framework instructions from embedded context data.
-- Context values that cannot be represented in the target structured format are invalid unless the caller preprocesses them with `drop` or an equivalent caller-side transformation.
+### 4.1 Evidence Handling
+- Caller-supplied evidence is application data, not executable instruction text.
+- `system_prompt` is the caller-facing top-level instruction surface and MUST remain distinct from caller-supplied evidence.
+- Each LLM-backed primitive call MUST accept exactly one evidence surface: `context` or `messages`.
+- `context` is a convenience shorthand for simple structured input or plain text.
+- `messages` is the primary explicit surface for ordered conversation history, mixed evidence, and future multimodal inputs.
+- Implementations MAY internally canonicalize evidence before calling a provider, but they MUST preserve caller-observable ordering, role boundaries, part boundaries, and modality semantics.
+- The framework MUST NOT require callers to lossily normalize all evidence into JSON before a call.
+- Values supplied through `context` or `json` message parts MUST already be JSON-compatible. Invalid values MUST fail before any provider call.
+- The public contract does not promise best-effort coercion of arbitrary Python objects into JSON-compatible values.
+- The message-part contract MUST be extensible to future modalities. If a caller supplies a part type that is valid in the public contract but unsupported by the active runtime or adapter, the call MUST fail before any provider call.
 
 ### 4.2 Output Validation
 - Every LLM-backed primitive MUST declare an explicit target shape before the provider call.
@@ -193,29 +200,44 @@ Rules:
 ## 6. Public Interface Contracts
 
 Canonical public parameter names for LLM-backed operations are part of the contract:
-- Direct primitive functions MUST accept `adapter`, `context`, and `model`, plus optional `max_attempts` and optional `system_prompt`.
-- Matching `LLMOps` instance methods MUST accept `context`, plus optional `model`, optional `max_attempts`, and optional `system_prompt`; they MUST NOT require an `adapter` argument because the adapter is instance state.
+- Direct primitive functions MUST accept `adapter`, `model`, and exactly one of `context` or `messages`, plus optional `max_attempts` and optional `system_prompt`.
+- Matching `LLMOps` instance methods MUST accept exactly one of `context` or `messages`, plus optional `model`, optional `max_attempts`, and optional `system_prompt`; they MUST NOT require an `adapter` argument because the adapter is instance state.
 - Operation-specific public parameter names are `expression` for `eval_bool`, `labels` for `classify`, `schema` for `extract`, and `labels` or `commands` plus optional `auto_execute` for `dispatch`.
 - Implementations MAY also support positional calling conventions, but the keyword names above are the canonical stable API surface.
 
-### 6.1 `drop(...) -> Any`
-`drop` is a local deterministic helper for pruning or sanitizing nested input data before context serialization.
+### 6.1 Evidence Inputs
 
-Contract:
-- It MUST NOT call an LLM or provider.
-- Given the same input, it MUST return the same output.
-- It MUST NOT invent new semantic content.
-- It SHOULD return a value that is safer and easier to serialize than the original input.
+Canonical message shapes:
 
-The exact pruning policy is intentionally not fixed by this architecture document. What is fixed is the boundary: `drop` is preprocessing only and does not change any LLM-backed primitive's semantic contract.
+```python
+Message = {
+    "role": "user" | "assistant",
+    "parts": list["MessagePart"],
+}
+
+MessagePart = (
+    {"type": "text", "text": str}
+    | {"type": "json", "data": Any}
+)
+```
+
+Rules:
+- A call MUST NOT provide both `context` and `messages`.
+- `context` is the convenience shorthand for simple cases. `messages` is the canonical advanced input surface.
+- If `messages` is supplied, order MUST be preserved exactly as provided by the caller.
+- In this revision, support for `text` and `json` message parts is required.
+- `json` message parts MUST contain JSON-compatible data.
+- Callers MUST NOT supply `system` messages through `messages`; system-level guidance belongs in `system_prompt`.
+- Implementations MAY internally expand `context` into provider-neutral message objects, but that transformation is not part of the public API contract.
+- The message-part contract MUST remain extensible so future revisions can add `image`, `audio`, `video`, or `file` parts without breaking the instruction/evidence boundary.
 
 ### 6.2 `eval_bool(...) -> bool`
-Purpose: decide whether a caller-supplied expression is true or false given context.
+Purpose: decide whether a caller-supplied expression is true or false given the supplied evidence.
 
 Required inputs:
 - adapter,
 - model,
-- context,
+- exactly one of `context` or `messages`,
 - `expression`: a string describing the proposition to evaluate.
 
 Validation contract:
@@ -232,7 +254,7 @@ Purpose: choose exactly one label from a closed set.
 Required inputs:
 - adapter,
 - model,
-- context,
+- exactly one of `context` or `messages`,
 - `labels`: non-empty finite set of allowed label strings.
 
 Validation contract:
@@ -250,7 +272,7 @@ Purpose: return structured data that conforms to a caller-supplied schema.
 Required inputs:
 - adapter,
 - model,
-- context,
+- exactly one of `context` or `messages`,
 - `schema`: target JSON Schema mapping or supported model type.
 
 Validation contract:
@@ -273,7 +295,7 @@ Dispatch has two mutually exclusive modes:
 Required inputs:
 - adapter,
 - model,
-- context,
+- exactly one of `context` or `messages`,
 - exactly one menu parameter: `labels` or `commands`.
 
 Optional input:
@@ -305,7 +327,7 @@ AdapterRequest = {
     "operation": "eval_bool" | "classify" | "extract" | "dispatch",
     "model": str,
     "instructions": str,   # framework-owned instructions plus any allowed caller supplement
-    "context_json": str,   # serialized context envelope
+    "messages": list[Message],
     "output_schema": dict, # JSON Schema contract for this attempt
     "attempt": int,        # 1-based attempt number
 }
@@ -313,7 +335,9 @@ AdapterRequest = {
 
 Request rules:
 - `instructions` MUST already be fully assembled by the framework core for that attempt. Adapters MUST treat it as opaque text and MUST NOT rewrite its meaning beyond provider-specific transport formatting.
-- `context_json` MUST be the exact serialized envelope that the core wants the model to treat as data. Adapters MUST NOT parse and reserialize it in a way that changes content.
+- `messages` MUST represent the exact ordered caller evidence for that attempt after any lossless expansion of `context` shorthand.
+- Adapters MUST preserve the separation between `instructions` and `messages`, even when a provider-specific payload format uses system/developer/user roles internally.
+- Adapters MUST preserve message ordering, roles, and part semantics, subject only to provider-specific transport formatting.
 - `output_schema` MUST be the complete JSON Schema contract for the provider call, including any schema derived from a supported model type.
 - `attempt` is observable only to the adapter implementation and exists so retries can be distinguished without changing the primitive contract.
 
@@ -411,12 +435,13 @@ Method rules:
 - Async instance methods MUST preserve the same operation-specific argument names defined in Section 6, except that `adapter` is omitted because it is bound to the instance.
 - Sync wrappers MUST preserve the same public argument names and return types as their async counterparts.
 - If an instance method call omits `model`, the wrapper's default model is used. If it supplies `model`, that value replaces the instance default for that call only.
+- Instance methods MUST preserve the same `context` versus `messages` evidence contract as the direct primitive functions.
 
 ## 9. End-to-End Processing Flow
 
 ### 9.1 Normal Success Path
 1. Validate caller arguments and construct the operation-specific output constraints.
-2. Normalize and serialize context into the framework's data envelope.
+2. Validate the selected evidence surface and assemble provider-neutral messages while preserving instruction/evidence boundaries.
 3. Submit the normalized request through the selected adapter and model.
 4. Parse provider output as JSON.
 5. Validate output against the operation's declared constraints.
@@ -442,7 +467,8 @@ These failures MUST surface with the corresponding Section 5.5 framework error c
 ## 10. Operational Constraints
 
 ### 10.1 Security and Safety
-- Context must be treated as data. Embedded user content MUST NOT be merged into framework instructions in a way that makes it authoritative prompt text.
+- Caller-supplied `context` or `messages` must be treated as data. Embedded user content MUST NOT be merged into framework instructions in a way that makes it authoritative prompt text.
+- `system_prompt` MUST remain separate from caller evidence at the public contract level.
 - `dispatch` MUST operate only on an explicit caller-supplied allowlist of labels or commands.
 - Command execution MUST be opt-in through `auto_execute=True`.
 - The framework MUST validate command arguments before invoking an executor.
@@ -460,11 +486,11 @@ A conforming implementation SHOULD emit operation-level telemetry sufficient to 
 Telemetry SHOULD avoid logging raw context or model output by default when those may contain sensitive data, or it SHOULD support caller-controlled redaction.
 
 ### 10.3 Performance and Runtime Assumptions
-- `drop` MUST execute locally and deterministically without network access.
+- Evidence validation and any lossless expansion of `context` into provider-neutral messages MUST execute locally and deterministically without network access.
 - LLM-backed primitive latency is dominated by provider round trips and increases with retry count.
 - The implementation MUST support asynchronous invocation as a first-class mode.
 - Sync wrappers are compatibility APIs for non-async callers and do not define different business behavior.
-- The framework MUST keep per-call state isolated so concurrent calls cannot leak context, prompts, or validation results across requests.
+- The framework MUST keep per-call state isolated so concurrent calls cannot leak evidence, prompts, or validation results across requests.
 - Repair attempts MUST occur within the lifetime of the original call; this architecture does not define deferred retries, background jobs, or queue-backed recovery.
 
 ### 10.4 Compatibility Boundary

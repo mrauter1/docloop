@@ -21,8 +21,8 @@ Its core intent is to replace brittle free-form prompting with a small set of co
 4. **Validation + recovery loop**  
    The framework assumes responses may be imperfect and includes structured retry/repair to recover to valid outputs.
 
-5. **Data-safe context framing**  
-   Context is treated as data, explicitly wrapped to reduce accidental instruction execution from embedded content.
+5. **Explicit instruction/evidence boundaries**  
+   `system_prompt` stays separate from caller evidence so user data is not confused with framework instructions.
 
 6. **Composable orchestration**  
    The primitives support simple checks, classification, extraction, and controlled tool/command routing in one unified shape.
@@ -31,14 +31,15 @@ Its core intent is to replace brittle free-form prompting with a small set of co
 
 ## Complete End-to-End Flow
 
-### 1) Input normalization
+### 1) Input handling
 You pass:
 - an adapter (provider binding),
 - a model,
-- context data,
+- optional `system_prompt`,
+- either simple `context` data or explicit `messages`,
 - operation-specific constraints (expression, labels, schema, choices).
 
-For structured tasks, context is serialized into a deterministic data envelope.
+For simple cases, `context` is a shorthand. For mixed evidence, conversation history, or future multimodal inputs, `messages` is the primary surface.
 
 ### 2) Constraint declaration
 Fuzzy builds explicit output constraints:
@@ -78,11 +79,8 @@ On success, Fuzzy returns a typed result:
 
 ## Core Primitives
 
-### `drop(...) -> Any`
-Deterministic, non-LLM pruning/sanitization of nested data.
-
 ### `eval_bool(...) -> bool`
-Evaluates whether an expression is true/false given context.
+Evaluates whether an expression is true/false given the supplied evidence.
 
 ### `classify(...) -> str`
 Selects exactly one label from an allowed finite set.
@@ -129,6 +127,27 @@ Instance methods:
 - `classify_sync(...)`
 - `extract_sync(...)`
 - `dispatch_sync(...)`
+
+## Input Surfaces
+
+### `system_prompt`
+Simple top-level instruction surface that stays separate from caller evidence.
+
+### `context`
+Convenience shorthand for simple structured inputs.
+
+### `messages`
+Primary advanced input surface for ordered conversation history and mixed evidence.
+
+Current required part types:
+- `text`
+- `json`
+
+Future-compatible direction:
+- image
+- audio
+- video
+- file
 
 ---
 

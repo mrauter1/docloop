@@ -1,0 +1,13 @@
+{
+  "name": "template-suite",
+  "task": "classification",
+  "cases": [
+    {
+      "name": "placeholder",
+      "context": {
+        "message": "template"
+      },
+      "expected": "placeholder"
+    }
+  ]
+}

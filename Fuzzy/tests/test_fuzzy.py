@@ -6,8 +6,9 @@ from typing import Any
 import jsonschema
 import pytest
 
-from fuzzy import Command, FrameworkError, LLMAdapter, LLMOps, classify, dispatch, drop, eval_bool, extract
-from fuzzy.adapters import OpenAIAdapter, OpenRouterAdapter, _http_error_category
+from fuzzy import Command, FrameworkError, LLMAdapter, LLMOps, classify, dispatch, eval_bool, extract
+from fuzzy.adapters import AnthropicAdapter, GeminiAdapter, OpenAIAdapter, OpenRouterAdapter, _http_error_category
+from fuzzy.core import drop
 from fuzzy.errors import ProviderError, SchemaValidationError
 from fuzzy.schema import ensure_json_schema, validate_json
 
@@ -52,7 +53,214 @@ def test_eval_bool_retries_malformed_json_then_succeeds():
     assert value is True
     assert len(adapter.requests) == 2
     assert "Previous attempt failed validation (malformed_json)" in adapter.requests[1]["instructions"]
-    assert adapter.requests[0]["context_json"] == '{"context":{"answer":42}}'
+    assert adapter.requests[0]["messages"] == [
+        {"role": "user", "parts": [{"type": "json", "data": {"answer": 42}}]}
+    ]
+    assert "context_json" not in adapter.requests[0]
+
+
+def test_eval_bool_accepts_messages_and_preserves_order():
+    adapter = FakeAdapter(['{"result": true}'])
+
+    value = asyncio.run(
+        eval_bool(
+            adapter=adapter,
+            model="gpt-test",
+            messages=[
+                {"role": "user", "parts": [{"type": "text", "text": "The answer is below."}]},
+                {"role": "assistant", "parts": [{"type": "text", "text": "Waiting for evidence."}]},
+                {"role": "user", "parts": [{"type": "json", "data": {"answer": 42}}]},
+            ],
+            expression="answer equals 42",
+        )
+    )
+
+    assert value is True
+    assert adapter.requests[0]["messages"] == [
+        {"role": "user", "parts": [{"type": "text", "text": "The answer is below."}]},
+        {"role": "assistant", "parts": [{"type": "text", "text": "Waiting for evidence."}]},
+        {"role": "user", "parts": [{"type": "json", "data": {"answer": 42}}]},
+    ]
+
+
+def test_eval_bool_accepts_explicit_none_context_as_json_null():
+    adapter = FakeAdapter(['{"result": true}'])
+
+    value = asyncio.run(
+        eval_bool(
+            adapter=adapter,
+            model="gpt-test",
+            context=None,
+            expression="context is null",
+        )
+    )
+
+    assert value is True
+    assert adapter.requests[0]["messages"] == [
+        {"role": "user", "parts": [{"type": "json", "data": None}]}
+    ]
+
+
+def test_eval_bool_treats_string_context_as_text_part():
+    adapter = FakeAdapter(['{"result": true}'])
+
+    value = asyncio.run(
+        eval_bool(
+            adapter=adapter,
+            model="gpt-test",
+            context="answer is 42",
+            expression="answer is stated",
+        )
+    )
+
+    assert value is True
+    assert adapter.requests[0]["messages"] == [
+        {"role": "user", "parts": [{"type": "text", "text": "answer is 42"}]}
+    ]
+
+
+def test_eval_bool_rejects_both_context_and_messages_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            eval_bool(
+                adapter=adapter,
+                model="gpt-test",
+                context={"x": 1},
+                messages=[{"role": "user", "parts": [{"type": "text", "text": "x is 1"}]}],
+                expression="x == 1",
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
+
+
+def test_eval_bool_rejects_missing_context_and_messages_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            eval_bool(
+                adapter=adapter,
+                model="gpt-test",
+                expression="x == 1",
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
+
+
+def test_eval_bool_rejects_invalid_message_role_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            eval_bool(
+                adapter=adapter,
+                model="gpt-test",
+                messages=[{"role": "system", "parts": [{"type": "text", "text": "bad"}]}],
+                expression="x == 1",
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
+
+
+def test_eval_bool_rejects_invalid_message_part_type_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            eval_bool(
+                adapter=adapter,
+                model="gpt-test",
+                messages=[{"role": "user", "parts": [{"type": "image", "source": "bad"}]}],
+                expression="x == 1",
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
+
+
+def test_eval_bool_rejects_non_json_message_data_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            eval_bool(
+                adapter=adapter,
+                model="gpt-test",
+                messages=[{"role": "user", "parts": [{"type": "json", "data": object()}]}],
+                expression="x == 1",
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
+
+
+def test_eval_bool_rejects_unexpected_message_fields_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            eval_bool(
+                adapter=adapter,
+                model="gpt-test",
+                messages=[
+                    {
+                        "role": "user",
+                        "parts": [{"type": "text", "text": "ok"}],
+                        "unexpected": "field",
+                    }
+                ],
+                expression="x == 1",
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
+
+
+def test_eval_bool_rejects_unexpected_message_part_fields_before_provider_call():
+    adapter = FakeAdapter([])
+
+    with pytest.raises(FrameworkError) as exc_info:
+        asyncio.run(
+            eval_bool(
+                adapter=adapter,
+                model="gpt-test",
+                messages=[
+                    {
+                        "role": "user",
+                        "parts": [{"type": "text", "text": "ok", "unexpected": "field"}],
+                    }
+                ],
+                expression="x == 1",
+            )
+        )
+
+    exc = exc_info.value
+    assert exc.category == "invalid_configuration"
+    assert exc.attempt_count == 0
+    assert adapter.requests == []
 
 
 def test_classify_exhausts_choice_validation():
@@ -516,6 +724,23 @@ def test_llmops_defaults_and_sync_wrapper():
     assert "default prompt" in adapter.requests[0]["instructions"]
 
 
+def test_llmops_accepts_messages():
+    adapter = FakeAdapter(['{"label":"keep"}'])
+    ops = LLMOps(adapter=adapter, model="default-model")
+
+    value = asyncio.run(
+        ops.classify(
+            messages=[{"role": "user", "parts": [{"type": "text", "text": "keep this"}]}],
+            labels=["keep", "drop"],
+        )
+    )
+
+    assert value == "keep"
+    assert adapter.requests[0]["messages"] == [
+        {"role": "user", "parts": [{"type": "text", "text": "keep this"}]}
+    ]
+
+
 def test_llmops_sync_wrapper_works_inside_running_loop():
     adapter = FakeAdapter(['{"label":"keep"}'])
     ops = LLMOps(adapter=adapter, model="m")
@@ -820,11 +1045,198 @@ def test_openai_adapter_malformed_nested_output_maps_to_provider_contract():
     assert exc_info.value.category == "provider_contract"
 
 
+def test_openai_adapter_builds_payload_from_ordered_messages():
+    adapter = OpenAIAdapter(api_key="test-key")
+    captured = {}
+
+    def fake_post_json(payload):
+        captured["payload"] = payload
+        return {"id": "response-1", "output_text": '{"result": true}'}
+
+    adapter._post_json = fake_post_json
+
+    response = asyncio.run(
+        adapter.complete(
+            {
+                "operation": "eval_bool",
+                "model": "gpt-test",
+                "instructions": "Follow the schema.",
+                "messages": [
+                    {"role": "user", "parts": [{"type": "text", "text": "first"}]},
+                    {"role": "assistant", "parts": [{"type": "json", "data": {"seen": True}}]},
+                ],
+                "output_schema": {"type": "object"},
+                "attempt": 1,
+            }
+        )
+    )
+
+    assert response["raw_text"] == '{"result": true}'
+    assert captured["payload"]["input"] == [
+        {
+            "role": "system",
+            "content": [{"type": "input_text", "text": "Follow the schema."}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first"}],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "input_text", "text": '{"seen":true}'}],
+        },
+    ]
+
+
 def test_openrouter_adapter_malformed_nested_output_maps_to_provider_contract():
     with pytest.raises(ProviderError) as exc_info:
         OpenRouterAdapter._extract_openrouter_text({"choices": [1]})
 
     assert exc_info.value.category == "provider_contract"
+
+
+def test_openrouter_adapter_builds_payload_from_ordered_messages():
+    adapter = OpenRouterAdapter(api_key="test-key")
+    captured = {}
+
+    def fake_post_json(payload):
+        captured["payload"] = payload
+        return {
+            "id": "response-1",
+            "choices": [{"message": {"content": '{"result": true}'}}],
+        }
+
+    adapter._post_json = fake_post_json
+
+    response = asyncio.run(
+        adapter.complete(
+            {
+                "operation": "eval_bool",
+                "model": "gpt-test",
+                "instructions": "Follow the schema.",
+                "messages": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"type": "text", "text": "first"},
+                            {"type": "json", "data": {"seen": True}},
+                        ],
+                    },
+                    {"role": "assistant", "parts": [{"type": "text", "text": "second"}]},
+                ],
+                "output_schema": {"type": "object"},
+                "attempt": 1,
+            }
+        )
+    )
+
+    assert response["raw_text"] == '{"result": true}'
+    assert captured["payload"]["messages"] == [
+        {"role": "system", "content": "Follow the schema."},
+        {"role": "user", "content": 'first\n\n{"seen":true}'},
+        {"role": "assistant", "content": "second"},
+    ]
+
+
+def test_anthropic_adapter_malformed_nested_output_maps_to_provider_contract():
+    with pytest.raises(ProviderError) as exc_info:
+        AnthropicAdapter._extract_anthropic_text({"content": [1]})
+
+    assert exc_info.value.category == "provider_contract"
+
+
+def test_anthropic_adapter_builds_payload_from_ordered_messages():
+    adapter = AnthropicAdapter(api_key="test-key")
+    captured = {}
+
+    def fake_post_json(payload):
+        captured["payload"] = payload
+        return {
+            "id": "anthropic-1",
+            "content": [{"type": "text", "text": '{"result": true}'}],
+            "usage": {"input_tokens": 4, "output_tokens": 2},
+        }
+
+    adapter._post_json = fake_post_json
+
+    response = asyncio.run(
+        adapter.complete(
+            {
+                "operation": "eval_bool",
+                "model": "claude-3-5-haiku-latest",
+                "instructions": "Follow the schema.",
+                "messages": [
+                    {"role": "user", "parts": [{"type": "text", "text": "first"}]},
+                    {"role": "assistant", "parts": [{"type": "json", "data": {"seen": True}}]},
+                ],
+                "output_schema": {"type": "object"},
+                "attempt": 1,
+            }
+        )
+    )
+
+    assert response["raw_text"] == '{"result": true}'
+    assert response["provider_metadata"] == {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
+    assert captured["payload"]["system"].startswith("Follow the schema.")
+    assert captured["payload"]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "first"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": '{"seen":true}'}]},
+    ]
+
+
+def test_gemini_adapter_malformed_nested_output_maps_to_provider_contract():
+    with pytest.raises(ProviderError) as exc_info:
+        GeminiAdapter._extract_gemini_text({"candidates": [1]})
+
+    assert exc_info.value.category == "provider_contract"
+
+
+def test_gemini_adapter_builds_payload_from_ordered_messages():
+    adapter = GeminiAdapter(api_key="test-key")
+    captured = {}
+
+    def fake_post_json(model, payload):
+        captured["model"] = model
+        captured["payload"] = payload
+        return {
+            "responseId": "gemini-1",
+            "candidates": [{"content": {"parts": [{"text": '{"result": true}'}]}}],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 3, "totalTokenCount": 8},
+        }
+
+    adapter._post_json = fake_post_json
+
+    response = asyncio.run(
+        adapter.complete(
+            {
+                "operation": "eval_bool",
+                "model": "gemini-2.0-flash",
+                "instructions": "Follow the schema.",
+                "messages": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"type": "text", "text": "first"},
+                            {"type": "json", "data": {"seen": True}},
+                        ],
+                    },
+                    {"role": "assistant", "parts": [{"type": "text", "text": "second"}]},
+                ],
+                "output_schema": {"type": "object"},
+                "attempt": 1,
+            }
+        )
+    )
+
+    assert response["raw_text"] == '{"result": true}'
+    assert response["provider_response_id"] == "gemini-1"
+    assert response["provider_metadata"] == {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+    assert captured["model"] == "gemini-2.0-flash"
+    assert captured["payload"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert captured["payload"]["contents"] == [
+        {"role": "user", "parts": [{"text": 'first\n\n{"seen":true}'}]},
+        {"role": "model", "parts": [{"text": "second"}]},
+    ]
 
 
 def test_adapter_missing_raw_text_maps_to_provider_contract_without_retry():
