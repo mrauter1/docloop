@@ -21,6 +21,11 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+try:
+    import yaml
+except ImportError:  # pragma: no cover - exercised in environments without optional deps installed
+    yaml = None
+
 from loop_control import (
     LoopControl,
     LoopControlParseError,
@@ -44,6 +49,24 @@ PAIR_ARTIFACTS = {
     "implement": ["implementation_notes.md", "review_findings.md"],
     "test": ["test_strategy.md", "test_gaps.md"],
 }
+
+PHASED_PAIRS = frozenset({"implement", "test"})
+PHASE_MODE_SINGLE = "single"
+PHASE_MODE_UP_TO = "up-to"
+PHASE_PLAN_VERSION = 1
+PHASE_STATUS_PLANNED = "planned"
+PHASE_STATUS_IN_PROGRESS = "in_progress"
+PHASE_STATUS_COMPLETED = "completed"
+PHASE_STATUS_BLOCKED = "blocked"
+PHASE_STATUS_DEFERRED = "deferred"
+RUNTIME_PHASE_STATUSES = {
+    PHASE_STATUS_PLANNED,
+    PHASE_STATUS_IN_PROGRESS,
+    PHASE_STATUS_COMPLETED,
+    PHASE_STATUS_BLOCKED,
+    PHASE_STATUS_DEFERRED,
+}
+IMPLICIT_PHASE_ID = "implicit-phase"
 
 PAIR_CRITERIA_TEMPLATES = {
     "plan": """# Plan Verification Criteria
@@ -90,6 +113,8 @@ Turn the user intent into an implementation-ready plan with milestones, interfac
 ## Required outputs
 Update `.superloop/plan/plan.md` as the single source of truth for the plan, including milestones, interface definitions, and risk register details in that one file.
 
+Create or update `.superloop/plan/phase_plan.yaml` as the canonical machine-readable ordered phase decomposition. If the task is genuinely small and coherently shippable as one slice, produce exactly one explicit phase rather than inventing artificial decomposition.
+
 Also append a concise entry to `.superloop/plan/feedback.md` with what changed and why.
 
 ## Rules
@@ -98,15 +123,17 @@ Also append a concise entry to `.superloop/plan/feedback.md` with what changed a
 3. Keep the plan concrete and implementation-ready.
 4. Apply KISS and DRY; avoid speculative complexity.
 5. Do not edit `.superloop/plan/criteria.md` (verifier-owned).
-6. If the user request is ambiguous, logically flawed, introduces breaking changes, may cause regressions, or may create hidden unintended behavior, warn the user via a clarifying question.
-7. Every clarifying question must include your best suggestion/supposition so the user can confirm or correct quickly.
-8. When asking a clarifying question, do not edit files and output exactly one canonical loop-control block as the last non-empty logical block:
+6. `phase_plan.yaml` must define coherent ordered phases with explicit dependency ordering, in-scope/out-of-scope boundaries, acceptance criteria, and future-phase deferments. Do not use heuristics or scoring rules for granularity.
+7. Accept a single explicit phase when scope is small and coherent; do not force multi-phase decomposition for its own sake.
+8. If the user request is ambiguous, logically flawed, introduces breaking changes, may cause regressions, or may create hidden unintended behavior, warn the user via a clarifying question.
+9. Every clarifying question must include your best suggestion/supposition so the user can confirm or correct quickly.
+10. When asking a clarifying question, do not edit files and output exactly one canonical loop-control block as the last non-empty logical block:
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
 </loop-control>
 Legacy `<question>...</question>` remains supported for compatibility, but the canonical loop-control block is the default contract.
-9. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
-10. Do not output any `<promise>...</promise>` tag.
+11. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
+12. Do not output any `<promise>...</promise>` tag.
 """,
     "implement": """# Superloop Implementer Instructions
 You are the implementation agent for this repository.
@@ -116,6 +143,7 @@ Implement the approved plan and reviewer feedback with high-quality multi-file c
 
 ## Working set
 - Request snapshot and run raw log identified in the run preamble
+- The active phase execution contract injected in the run preamble for implement/test phase-scoped runs
 - Repository areas required by the current task and justified blast radius
 - `.superloop/implement/feedback.md`
 - `.superloop/plan/plan.md`
@@ -129,16 +157,17 @@ Implement the approved plan and reviewer feedback with high-quality multi-file c
 5. Resolve reviewer findings explicitly and avoid introducing unrelated refactors.
 6. When you see duplicated logic that clearly adds technical debt, centralize it into a shared abstraction/module unless that would introduce unjustified complexity.
 7. Before finalizing edits, check likely regression surfaces for touched behavior (interfaces, persisted data, compatibility, tests).
-8. Map your edits to the implementation checklist in `.superloop/plan/plan.md` when present, and note any checklist item you intentionally defer.
-9. Update `.superloop/implement/implementation_notes.md` with: files changed, checklist mapping, assumptions, expected side effects, and any deduplication/centralization decisions.
-10. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
-11. Do not edit `.superloop/implement/criteria.md` (reviewer-owned).
-12. If ambiguity or intent gaps remain, or if a required change may introduce breaking behavior/regressions, ask a clarifying question with your best suggestion/supposition and do not edit files:
+8. Treat the active phase contract as authoritative scoped work for implement/test runs. Any intentional out-of-phase change must be explicitly justified in `.superloop/implement/implementation_notes.md`.
+9. Map your edits to the implementation checklist in `.superloop/plan/plan.md` when present, and note any checklist item you intentionally defer.
+10. Update `.superloop/implement/implementation_notes.md` with: files changed, checklist mapping, assumptions, expected side effects, and any deduplication/centralization decisions.
+11. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
+12. Do not edit `.superloop/implement/criteria.md` (reviewer-owned).
+13. If ambiguity or intent gaps remain, or if a required change may introduce breaking behavior/regressions, ask a clarifying question with your best suggestion/supposition and do not edit files:
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
 </loop-control>
 Legacy `<question>...</question>` remains supported for compatibility, but the canonical loop-control block is the default contract.
-13. Do not output any `<promise>...</promise>` tag.
+14. Do not output any `<promise>...</promise>` tag.
 """,
     "test": """# Superloop Test Author Instructions
 You are the test authoring agent for this repository.
@@ -148,6 +177,7 @@ Create or refine tests and fixtures to validate changed behavior and prevent reg
 
 ## Required outputs
 - Update relevant test files in the repository.
+- Respect the active phase execution contract injected in the run preamble for test-phase runs.
 - Update `.superloop/test/test_strategy.md` with an explicit behavior-to-test coverage map.
 - Append a concise entry to `.superloop/test/feedback.md` summarizing test additions.
 
@@ -192,6 +222,9 @@ or the same shape with `INCOMPLETE` / `BLOCKED`.
 - Focus on request-relevant and changed-scope plan sections first; justify any out-of-scope finding. Broaden analysis when cross-cutting patterns/dependencies or small-repo economics make wider review safer.
 - A finding may be `blocking` only if it materially risks correctness, compatibility, hidden behavior changes, or implementation failure.
 - For each `blocking` finding include evidence: affected section(s), concrete failure/conflict scenario, and minimal correction direction.
+- Validate `phase_plan.yaml` quality by review judgment: coherent boundaries, dependency ordering, acceptance criteria, and future-phase deferments.
+- Accept a single explicit phase when the task is genuinely small and coherent; do not require multiple phases for their own sake.
+- Do not require or invent runtime heuristics for phase granularity.
 - Do not return `INCOMPLETE` if you have no blocking findings.
 - Ask a canonical `<loop-control>` question block only when missing product intent makes safe verification impossible, and include best suggestion/supposition.
 - If COMPLETE, every checkbox in criteria must be checked.
@@ -309,7 +342,17 @@ class ResumeCheckpoint:
     pair_start_index: int
     cycle_by_pair: Dict[str, int]
     attempts_by_pair_cycle: Dict[Tuple[str, int], int]
+    cycle_by_phase_pair: Dict[Tuple[str, str], int]
+    attempts_by_phase_pair_cycle: Dict[Tuple[str, str, int], int]
+    completed_pairs_by_phase: Dict[str, Tuple[str, ...]]
+    emitted_phase_started_ids: Tuple[str, ...]
+    emitted_phase_completed_ids: Tuple[str, ...]
+    emitted_phase_deferred_keys: Tuple[Tuple[str, str], ...]
+    scope_event_seen: bool
     last_sequence: int
+    phase_mode: Optional[str] = None
+    phase_ids: Tuple[str, ...] = ()
+    current_phase_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -318,6 +361,58 @@ class PhaseSnapshot:
 
     ref: str
     untracked_paths: frozenset[str]
+
+
+@dataclass(frozen=True)
+class PhasePlanCriterion:
+    id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class PhasePlanPhase:
+    phase_id: str
+    title: str
+    objective: str
+    in_scope: Tuple[str, ...]
+    out_of_scope: Tuple[str, ...]
+    dependencies: Tuple[str, ...]
+    acceptance_criteria: Tuple[PhasePlanCriterion, ...]
+    deliverables: Tuple[str, ...]
+    risks: Tuple[str, ...]
+    rollback: Tuple[str, ...]
+    status: str
+
+
+@dataclass(frozen=True)
+class PhasePlan:
+    version: int
+    task_id: str
+    request_snapshot_ref: str
+    phases: Tuple[PhasePlanPhase, ...]
+    explicit: bool = True
+
+    def phase_by_id(self, phase_id: str) -> Optional[PhasePlanPhase]:
+        for phase in self.phases:
+            if phase.phase_id == phase_id:
+                return phase
+        return None
+
+
+@dataclass(frozen=True)
+class ResolvedPhaseSelection:
+    phase_mode: str
+    phase_ids: Tuple[str, ...]
+    phases: Tuple[PhasePlanPhase, ...]
+    explicit: bool
+
+    @property
+    def is_implicit(self) -> bool:
+        return not self.explicit
+
+
+class PhasePlanError(ValueError):
+    """Raised when phase-plan state is invalid or ambiguous."""
 
 
 def fatal(message: str, exit_code: int = 1):
@@ -348,6 +443,10 @@ def normalize_repo_path(path_text: str) -> str:
     if " -> " in cleaned:
         cleaned = cleaned.split(" -> ", 1)[1]
     return cleaned
+
+
+def phase_plan_file(task_dir: Path) -> Path:
+    return task_dir / "plan" / "phase_plan.yaml"
 
 
 def parse_status_paths(status_text: str) -> Set[str]:
@@ -427,6 +526,393 @@ def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[
     else:
         pair_paths = [f"{task_root}/{pair}/"]
     return [*shared_paths, *pair_paths]
+
+
+def _phase_criteria_payload(raw_value: object, label: str) -> Tuple[PhasePlanCriterion, ...]:
+    if not isinstance(raw_value, list) or not raw_value:
+        raise PhasePlanError(f"{label} must be a non-empty list.")
+    items: List[PhasePlanCriterion] = []
+    for idx, raw_item in enumerate(raw_value, start=1):
+        if not isinstance(raw_item, dict):
+            raise PhasePlanError(f"{label}[{idx}] must be a mapping.")
+        criterion_id = raw_item.get("id")
+        text = raw_item.get("text")
+        if not isinstance(criterion_id, str) or not criterion_id.strip():
+            raise PhasePlanError(f"{label}[{idx}].id must be a non-empty string.")
+        if not isinstance(text, str) or not text.strip():
+            raise PhasePlanError(f"{label}[{idx}].text must be a non-empty string.")
+        items.append(PhasePlanCriterion(id=criterion_id.strip(), text=text.strip()))
+    return tuple(items)
+
+
+def _phase_string_list(raw_value: object, label: str, *, allow_empty: bool = True) -> Tuple[str, ...]:
+    if not isinstance(raw_value, list):
+        raise PhasePlanError(f"{label} must be a list.")
+    items: List[str] = []
+    for idx, raw_item in enumerate(raw_value, start=1):
+        if not isinstance(raw_item, str) or not raw_item.strip():
+            raise PhasePlanError(f"{label}[{idx}] must be a non-empty string.")
+        items.append(raw_item.strip())
+    if not allow_empty and not items:
+        raise PhasePlanError(f"{label} must be a non-empty list.")
+    return tuple(items)
+
+
+def validate_phase_plan(payload: object, task_id: str) -> PhasePlan:
+    if not isinstance(payload, dict):
+        raise PhasePlanError("phase_plan.yaml must contain a YAML mapping.")
+
+    version = payload.get("version")
+    if version != PHASE_PLAN_VERSION:
+        raise PhasePlanError(f"phase_plan.yaml version must be {PHASE_PLAN_VERSION}.")
+
+    payload_task_id = payload.get("task_id")
+    if payload_task_id != task_id:
+        raise PhasePlanError(f"phase_plan.yaml task_id must match task id {task_id!r}.")
+
+    request_snapshot_ref = payload.get("request_snapshot_ref")
+    if not isinstance(request_snapshot_ref, str) or not request_snapshot_ref.strip():
+        raise PhasePlanError("phase_plan.yaml request_snapshot_ref must be a non-empty string.")
+
+    raw_phases = payload.get("phases")
+    if not isinstance(raw_phases, list) or not raw_phases:
+        raise PhasePlanError("phase_plan.yaml phases must be a non-empty list.")
+
+    phase_ids: List[str] = []
+    built_phases: List[PhasePlanPhase] = []
+    for idx, raw_phase in enumerate(raw_phases, start=1):
+        if not isinstance(raw_phase, dict):
+            raise PhasePlanError(f"phases[{idx}] must be a mapping.")
+        label = f"phases[{idx}]"
+        phase_id = raw_phase.get("phase_id")
+        title = raw_phase.get("title")
+        objective = raw_phase.get("objective")
+        status = raw_phase.get("status")
+        if not isinstance(phase_id, str) or not phase_id.strip():
+            raise PhasePlanError(f"{label}.phase_id must be a non-empty string.")
+        normalized_phase_id = phase_id.strip()
+        if normalized_phase_id in phase_ids:
+            raise PhasePlanError(f"phase_plan.yaml contains duplicate phase_id {normalized_phase_id!r}.")
+        if not isinstance(title, str) or not title.strip():
+            raise PhasePlanError(f"{label}.title must be a non-empty string.")
+        if not isinstance(objective, str) or not objective.strip():
+            raise PhasePlanError(f"{label}.objective must be a non-empty string.")
+        if not isinstance(status, str) or status not in RUNTIME_PHASE_STATUSES:
+            raise PhasePlanError(
+                f"{label}.status must be one of: {', '.join(sorted(RUNTIME_PHASE_STATUSES))}."
+            )
+        phase_ids.append(normalized_phase_id)
+        built_phases.append(
+            PhasePlanPhase(
+                phase_id=normalized_phase_id,
+                title=title.strip(),
+                objective=objective.strip(),
+                in_scope=_phase_string_list(raw_phase.get("in_scope"), f"{label}.in_scope", allow_empty=False),
+                out_of_scope=_phase_string_list(raw_phase.get("out_of_scope"), f"{label}.out_of_scope"),
+                dependencies=_phase_string_list(raw_phase.get("dependencies"), f"{label}.dependencies"),
+                acceptance_criteria=_phase_criteria_payload(
+                    raw_phase.get("acceptance_criteria"),
+                    f"{label}.acceptance_criteria",
+                ),
+                deliverables=_phase_string_list(raw_phase.get("deliverables"), f"{label}.deliverables", allow_empty=False),
+                risks=_phase_string_list(raw_phase.get("risks"), f"{label}.risks"),
+                rollback=_phase_string_list(raw_phase.get("rollback"), f"{label}.rollback"),
+                status=status,
+            )
+        )
+
+    all_phase_ids = set(phase_ids)
+    seen_phase_ids: Set[str] = set()
+    for phase in built_phases:
+        for dependency in phase.dependencies:
+            if dependency in all_phase_ids and dependency not in seen_phase_ids:
+                raise PhasePlanError(
+                    f"phase {phase.phase_id!r} depends on phase {dependency!r}, "
+                    "which is not earlier in phase order."
+                )
+        seen_phase_ids.add(phase.phase_id)
+
+    return PhasePlan(
+        version=PHASE_PLAN_VERSION,
+        task_id=task_id,
+        request_snapshot_ref=request_snapshot_ref.strip(),
+        phases=tuple(built_phases),
+        explicit=True,
+    )
+
+
+def load_phase_plan(path: Path, task_id: str) -> Optional[PhasePlan]:
+    if not path.exists():
+        return None
+    if yaml is None:
+        raise PhasePlanError(
+            "phase_plan.yaml cannot be loaded without PyYAML installed. Install dependencies from requirements.txt."
+        )
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise PhasePlanError(f"{path} could not be parsed as YAML: {exc}") from exc
+    except OSError as exc:
+        raise PhasePlanError(f"{path} could not be read: {exc}") from exc
+    return validate_phase_plan(payload, task_id)
+
+
+def build_implicit_phase_plan(task_id: str, request_file: Path) -> PhasePlan:
+    request_text = request_file.read_text(encoding="utf-8").strip() if request_file.exists() else ""
+    summary = request_text if request_text else DEFAULT_REQUEST_TEXT
+    phase = PhasePlanPhase(
+        phase_id=IMPLICIT_PHASE_ID,
+        title="Implicit single phase",
+        objective="Complete the requested work described in the immutable request snapshot.",
+        in_scope=(summary,),
+        out_of_scope=(),
+        dependencies=(),
+        acceptance_criteria=(PhasePlanCriterion(id="AC-1", text="Implement the requested work coherently."),),
+        deliverables=("code", "tests", "docs"),
+        risks=(),
+        rollback=(),
+        status=PHASE_STATUS_PLANNED,
+    )
+    return PhasePlan(
+        version=PHASE_PLAN_VERSION,
+        task_id=task_id,
+        request_snapshot_ref=str(request_file),
+        phases=(phase,),
+        explicit=False,
+    )
+
+
+def restore_phase_selection(plan: PhasePlan, phase_ids: Sequence[str], phase_mode: Optional[str]) -> ResolvedPhaseSelection:
+    if not phase_ids:
+        raise PhasePlanError("Stored phase selection is empty.")
+    restored_phases: List[PhasePlanPhase] = []
+    expected_order = [phase.phase_id for phase in plan.phases if phase.phase_id in set(phase_ids)]
+    if expected_order != list(phase_ids):
+        raise PhasePlanError("Stored phase selection no longer matches phase plan order.")
+    for phase_id in phase_ids:
+        phase = plan.phase_by_id(phase_id)
+        if phase is None:
+            raise PhasePlanError(
+                f"Stored phase selection references unknown phase_id {phase_id!r}. "
+                "Regenerate or reconcile phase_plan.yaml."
+            )
+        restored_phases.append(phase)
+    return ResolvedPhaseSelection(
+        phase_mode=phase_mode or (PHASE_MODE_SINGLE if len(restored_phases) == 1 else PHASE_MODE_UP_TO),
+        phase_ids=tuple(phase_ids),
+        phases=tuple(restored_phases),
+        explicit=plan.explicit,
+    )
+
+
+def resolve_phase_selection(
+    plan: PhasePlan,
+    phase_id: Optional[str],
+    phase_mode: str,
+    enabled_pairs: Sequence[str],
+) -> ResolvedPhaseSelection:
+    if not any(pair in PHASED_PAIRS for pair in enabled_pairs):
+        raise PhasePlanError("Phase selection is only valid when implement or test is enabled.")
+    normalized_phase_id = phase_id.strip() if isinstance(phase_id, str) and phase_id.strip() else None
+    if normalized_phase_id is None and phase_mode == PHASE_MODE_UP_TO:
+        raise PhasePlanError("--phase-mode up-to requires --phase-id.")
+
+    if not plan.explicit:
+        if normalized_phase_id is not None:
+            raise PhasePlanError("--phase-id requires an explicit phase_plan.yaml.")
+        return ResolvedPhaseSelection(
+            phase_mode=PHASE_MODE_SINGLE,
+            phase_ids=(IMPLICIT_PHASE_ID,),
+            phases=plan.phases,
+            explicit=False,
+        )
+
+    if normalized_phase_id is None:
+        return ResolvedPhaseSelection(
+            phase_mode=phase_mode,
+            phase_ids=tuple(phase.phase_id for phase in plan.phases),
+            phases=plan.phases,
+            explicit=True,
+        )
+
+    selected_phase = plan.phase_by_id(normalized_phase_id)
+    if selected_phase is None:
+        raise PhasePlanError(f"Unknown --phase-id {normalized_phase_id!r} for current phase_plan.yaml.")
+
+    ordered_phases = list(plan.phases)
+    phase_index = ordered_phases.index(selected_phase)
+    selected_phases = ordered_phases[: phase_index + 1] if phase_mode == PHASE_MODE_UP_TO else [selected_phase]
+    return ResolvedPhaseSelection(
+        phase_mode=phase_mode,
+        phase_ids=tuple(phase.phase_id for phase in selected_phases),
+        phases=tuple(selected_phases),
+        explicit=True,
+    )
+
+
+def phase_prompt_context(selection: ResolvedPhaseSelection) -> str:
+    lines = [
+        "ACTIVE PHASE EXECUTION CONTRACT:",
+        f"- phase_mode: {selection.phase_mode}",
+        f"- phase_ids: {', '.join(selection.phase_ids)}",
+        f"- phase_plan_source: {'explicit phase_plan.yaml' if selection.explicit else 'implicit legacy fallback (no phase_plan.yaml)'}",
+    ]
+    for phase in selection.phases:
+        lines.extend(
+            [
+                "",
+                f"Phase {phase.phase_id}: {phase.title}",
+                f"Objective: {phase.objective}",
+                "In scope:",
+                *[f"- {item}" for item in phase.in_scope],
+            ]
+        )
+        if phase.out_of_scope:
+            lines.extend(["Out of scope:", *[f"- {item}" for item in phase.out_of_scope]])
+        if phase.acceptance_criteria:
+            lines.extend(
+                [
+                    "Acceptance criteria:",
+                    *[f"- {criterion.id}: {criterion.text}" for criterion in phase.acceptance_criteria],
+                ]
+            )
+        if phase.dependencies:
+            lines.extend(["Dependencies / deferments:", *[f"- {item}" for item in phase.dependencies]])
+        if phase.deliverables:
+            lines.extend(["Deliverables:", *[f"- {item}" for item in phase.deliverables]])
+    return "\n".join(lines)
+
+
+def active_phase_selection_from_meta(task_meta_file: Path) -> Tuple[Optional[str], Tuple[str, ...], int]:
+    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
+    raw_selection = payload.get("active_phase_selection")
+    if not isinstance(raw_selection, dict):
+        return None, (), 0
+    phase_mode = raw_selection.get("mode")
+    phase_ids = raw_selection.get("phase_ids")
+    current_phase_index = raw_selection.get("current_phase_index")
+    if not isinstance(phase_mode, str):
+        phase_mode = None
+    if not isinstance(phase_ids, list):
+        return phase_mode, (), 0
+    if not isinstance(current_phase_index, int) or current_phase_index < 0:
+        current_phase_index = 0
+    return phase_mode, tuple(item for item in phase_ids if isinstance(item, str) and item.strip()), current_phase_index
+
+
+def persist_phase_selection(
+    task_meta_file: Path,
+    selection: ResolvedPhaseSelection,
+    run_id: str,
+    plan_path: Path,
+    *,
+    current_phase_index: int = 0,
+):
+    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
+    payload["phase_plan_path"] = str(plan_path)
+    payload["phase_plan_version"] = PHASE_PLAN_VERSION
+    payload["active_phase_selection"] = {
+        "run_id": run_id,
+        "mode": selection.phase_mode,
+        "phase_ids": list(selection.phase_ids),
+        "explicit": selection.explicit,
+        "current_phase_index": current_phase_index,
+    }
+    raw_phase_status = payload.get("phase_status")
+    phase_status = raw_phase_status if isinstance(raw_phase_status, dict) else {}
+    for phase_id in selection.phase_ids:
+        current = phase_status.get(phase_id)
+        if current not in RUNTIME_PHASE_STATUSES:
+            phase_status[phase_id] = PHASE_STATUS_PLANNED
+    payload["phase_status"] = phase_status
+    _write_task_meta(task_meta_file, payload)
+
+
+def active_phase_index_from_meta(task_meta_file: Path) -> int:
+    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
+    raw_selection = payload.get("active_phase_selection")
+    if not isinstance(raw_selection, dict):
+        return 0
+    current_phase_index = raw_selection.get("current_phase_index")
+    if not isinstance(current_phase_index, int) or current_phase_index < 0:
+        return 0
+    return current_phase_index
+
+
+def resolve_resume_start_phase_index(
+    selection: ResolvedPhaseSelection,
+    phased_enabled: Sequence[str],
+    completed_pairs_by_phase: Dict[str, Tuple[str, ...]],
+) -> int:
+    if not selection.phase_ids:
+        return 0
+    for idx, phase_id in enumerate(selection.phase_ids):
+        completed_for_phase = set(completed_pairs_by_phase.get(phase_id, ()))
+        if any(pair not in completed_for_phase for pair in phased_enabled):
+            return idx
+    return len(selection.phase_ids)
+
+
+def resume_scope_matches(checkpoint: ResumeCheckpoint, selection: ResolvedPhaseSelection) -> bool:
+    if not checkpoint.scope_event_seen:
+        return False
+    if checkpoint.phase_ids != selection.phase_ids:
+        return False
+    if checkpoint.phase_mode is None:
+        return selection.phase_mode == PHASE_MODE_SINGLE
+    return checkpoint.phase_mode == selection.phase_mode
+
+
+def update_active_phase_index(task_meta_file: Path, phase_index: int, current_phase_id: Optional[str]):
+    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
+    raw_selection = payload.get("active_phase_selection")
+    selection = raw_selection if isinstance(raw_selection, dict) else {}
+    selection["current_phase_index"] = max(0, phase_index)
+    selection["current_phase_id"] = current_phase_id
+    payload["active_phase_selection"] = selection
+    _write_task_meta(task_meta_file, payload)
+
+
+def phase_pair_completed(completed_phase_pairs: Dict[str, Set[str]], phase_id: str, pair: str) -> bool:
+    return pair in completed_phase_pairs.get(phase_id, set())
+
+
+def mark_phase_pair_completed(completed_phase_pairs: Dict[str, Set[str]], phase_id: str, pair: str):
+    completed_phase_pairs.setdefault(phase_id, set()).add(pair)
+
+
+def mark_phase_status(
+    task_meta_file: Path,
+    phase_ids: Sequence[str],
+    status: str,
+    *,
+    run_id: str,
+    pair: Optional[str] = None,
+):
+    if status not in RUNTIME_PHASE_STATUSES:
+        raise PhasePlanError(f"Unsupported phase status {status!r}.")
+    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
+    raw_phase_status = payload.get("phase_status")
+    phase_status = raw_phase_status if isinstance(raw_phase_status, dict) else {}
+    raw_history = payload.get("phase_history")
+    history = list(raw_history) if isinstance(raw_history, list) else []
+    timestamp = datetime.now(timezone.utc).isoformat()
+    for phase_id in phase_ids:
+        if phase_status.get(phase_id) == status:
+            continue
+        phase_status[phase_id] = status
+        entry: Dict[str, object] = {
+            "phase_id": phase_id,
+            "run_id": run_id,
+            "status": status,
+            "ts": timestamp,
+        }
+        if pair is not None:
+            entry["pair"] = pair
+        history.append(entry)
+    payload["phase_status"] = phase_status
+    payload["phase_history"] = history
+    _write_task_meta(task_meta_file, payload)
 
 
 DEFAULT_REQUEST_TEXT = "No explicit initial request was provided for this run. Use repository artifacts and explicit clarifications only."
@@ -793,6 +1279,7 @@ def ensure_workspace(
     task_meta["request_text"] = existing_request
     if normalized_intent is not None or "request_updated_at" not in task_meta:
         task_meta["request_updated_at"] = datetime.now(timezone.utc).isoformat()
+    task_meta.setdefault("phase_plan_path", str(Path(task_root_rel) / "plan" / "phase_plan.yaml"))
     _write_task_meta(task_meta_file, task_meta)
 
     pair_dirs: Dict[str, Path] = {}
@@ -1005,6 +1492,7 @@ def build_phase_prompt(
     run_id: str,
     session_state: SessionState,
     include_request_snapshot: bool,
+    active_phase_selection: Optional[ResolvedPhaseSelection] = None,
 ) -> str:
     base_instructions = prompt_file.read_text(encoding="utf-8")
     request_text = request_file.read_text(encoding="utf-8").strip()
@@ -1045,6 +1533,13 @@ def build_phase_prompt(
                 request_text if request_text else DEFAULT_REQUEST_TEXT,
             ]
         )
+    if pair_name in PHASED_PAIRS and active_phase_selection is not None:
+        preamble.extend(
+            [
+                "",
+                phase_prompt_context(active_phase_selection),
+            ]
+        )
     return "\n".join(preamble) + "\n\nFollow the prompt rules exactly.\n\n" + base_instructions
 
 
@@ -1061,6 +1556,7 @@ def run_codex_phase(
     session_file: Path,
     run_raw_phase_log: Path,
     raw_phase_log: Path,
+    active_phase_selection: Optional[ResolvedPhaseSelection] = None,
 ) -> str:
     session_state = load_session_state(session_file, "persistent")
     session_state.mode = "persistent"
@@ -1077,6 +1573,7 @@ def run_codex_phase(
         run_id=run_id,
         session_state=session_state,
         include_request_snapshot=include_request_snapshot,
+        active_phase_selection=active_phase_selection,
     )
 
     if session_state.thread_id:
@@ -1360,10 +1857,15 @@ def write_run_summary(summary_file: Path, run_id: str, events_file: Path):
         "blocked": 0,
         "pair_completed": 0,
         "pair_failed": 0,
+        "phase_scope_resolved": 0,
+        "phase_started": 0,
+        "phase_completed": 0,
+        "phase_blocked": 0,
+        "phase_deferred": 0,
     }
 
     invariant_violations: List[str] = []
-    completed_pairs: Set[str] = set()
+    completed_pair_scopes: Set[Tuple[str, Optional[str]]] = set()
 
     with events_file.open("r", encoding="utf-8") as f:
         for line in f:
@@ -1376,13 +1878,27 @@ def write_run_summary(summary_file: Path, run_id: str, events_file: Path):
                 counters[event_type] += 1
 
             pair = event.get("pair")
-            if pair and pair in completed_pairs and event_type not in {"pair_completed", "run_finished"}:
+            phase_id = event.get("phase_id") if isinstance(event.get("phase_id"), str) else None
+            completion_scope = (pair, phase_id) if pair else None
+            allowed_after_pair_completion = {
+                "pair_completed",
+                "run_finished",
+                "phase_deferred",
+                "phase_completed",
+                "phase_blocked",
+            }
+            if (
+                completion_scope
+                and completion_scope in completed_pair_scopes
+                and event_type not in allowed_after_pair_completion
+            ):
                 invariant_violations.append(
-                    f"Pair {pair} received event {event_type} after pair_completed (seq={event.get('seq')})."
+                    f"Pair {pair} received event {event_type} after pair_completed for phase "
+                    f"{phase_id or '[global]'} (seq={event.get('seq')})."
                 )
 
             if event_type == "pair_completed" and pair:
-                completed_pairs.add(pair)
+                completed_pair_scopes.add((pair, phase_id))
 
     summary = (
         f"# Superloop Run Summary ({run_id})\n\n"
@@ -1392,6 +1908,11 @@ def write_run_summary(summary_file: Path, run_id: str, events_file: Path):
         f"- blocked events: {counters['blocked']}\n"
         f"- pair_completed events: {counters['pair_completed']}\n"
         f"- pair_failed events: {counters['pair_failed']}\n"
+        f"- phase_scope_resolved events: {counters['phase_scope_resolved']}\n"
+        f"- phase_started events: {counters['phase_started']}\n"
+        f"- phase_completed events: {counters['phase_completed']}\n"
+        f"- phase_blocked events: {counters['phase_blocked']}\n"
+        f"- phase_deferred events: {counters['phase_deferred']}\n"
     )
     if invariant_violations:
         summary += "\n## Invariant violations\n"
@@ -1517,7 +2038,17 @@ def load_resume_checkpoint(events_file: Path, enabled_pairs: Sequence[str]) -> R
     attempts: Dict[Tuple[str, int], int] = {}
     max_cycle_by_pair: Dict[str, int] = {}
     completed_pairs: Set[str] = set()
+    phase_attempts: Dict[Tuple[str, str, int], int] = {}
+    max_cycle_by_phase_pair: Dict[Tuple[str, str], int] = {}
+    completed_pairs_by_phase: Dict[str, Set[str]] = {}
+    emitted_phase_started_ids: Set[str] = set()
+    emitted_phase_completed_ids: Set[str] = set()
+    emitted_phase_deferred_keys: Set[Tuple[str, str]] = set()
+    scope_event_seen = False
     last_seq = 0
+    phase_mode: Optional[str] = None
+    phase_ids: Tuple[str, ...] = ()
+    current_phase_index = 0
 
     if events_file.exists():
         with events_file.open("r", encoding="utf-8") as f:
@@ -1531,16 +2062,48 @@ def load_resume_checkpoint(events_file: Path, enabled_pairs: Sequence[str]) -> R
                 cycle = event.get("cycle")
                 attempt = event.get("attempt")
                 seq = event.get("seq")
+                phase_id = event.get("phase_id") if isinstance(event.get("phase_id"), str) else None
 
                 if isinstance(seq, int):
                     last_seq = max(last_seq, seq)
                 if pair in enabled_pairs and isinstance(cycle, int):
-                    max_cycle_by_pair[pair] = max(max_cycle_by_pair.get(pair, 0), cycle)
-                    if isinstance(attempt, int):
-                        key = (pair, cycle)
-                        attempts[key] = max(attempts.get(key, 0), attempt)
+                    if phase_id is None:
+                        max_cycle_by_pair[pair] = max(max_cycle_by_pair.get(pair, 0), cycle)
+                        if isinstance(attempt, int):
+                            key = (pair, cycle)
+                            attempts[key] = max(attempts.get(key, 0), attempt)
+                    else:
+                        phase_pair_key = (phase_id, pair)
+                        max_cycle_by_phase_pair[phase_pair_key] = max(
+                            max_cycle_by_phase_pair.get(phase_pair_key, 0), cycle
+                        )
+                        if isinstance(attempt, int):
+                            attempt_key = (phase_id, pair, cycle)
+                            phase_attempts[attempt_key] = max(phase_attempts.get(attempt_key, 0), attempt)
                 if event_type == "pair_completed" and pair in enabled_pairs:
-                    completed_pairs.add(pair)
+                    if phase_id is None:
+                        completed_pairs.add(pair)
+                    else:
+                        completed_pairs_by_phase.setdefault(phase_id, set()).add(pair)
+                if event_type == "phase_scope_resolved":
+                    scope_event_seen = True
+                    raw_mode = event.get("phase_mode")
+                    raw_phase_ids = event.get("phase_ids")
+                    raw_current_phase_index = event.get("current_phase_index")
+                    if isinstance(raw_mode, str):
+                        phase_mode = raw_mode
+                    if isinstance(raw_phase_ids, list):
+                        phase_ids = tuple(
+                            item for item in raw_phase_ids if isinstance(item, str) and item.strip()
+                        )
+                    if isinstance(raw_current_phase_index, int) and raw_current_phase_index >= 0:
+                        current_phase_index = raw_current_phase_index
+                if event_type == "phase_started" and phase_id is not None:
+                    emitted_phase_started_ids.add(phase_id)
+                if event_type == "phase_completed" and phase_id is not None:
+                    emitted_phase_completed_ids.add(phase_id)
+                if event_type == "phase_deferred" and phase_id is not None and isinstance(pair, str):
+                    emitted_phase_deferred_keys.add((phase_id, pair))
 
     pair_start_index = len(enabled_pairs)
     for idx, pair in enumerate(enabled_pairs):
@@ -1553,11 +2116,27 @@ def load_resume_checkpoint(events_file: Path, enabled_pairs: Sequence[str]) -> R
         active_pair = enabled_pairs[pair_start_index]
         cycle_by_pair[active_pair] = max(0, max_cycle_by_pair.get(active_pair, 0) - 1)
 
+    cycle_by_phase_pair = {
+        phase_pair: max(0, cycle - 1) for phase_pair, cycle in max_cycle_by_phase_pair.items()
+    }
+
     return ResumeCheckpoint(
         pair_start_index=pair_start_index,
         cycle_by_pair=cycle_by_pair,
         attempts_by_pair_cycle=attempts,
+        cycle_by_phase_pair=cycle_by_phase_pair,
+        attempts_by_phase_pair_cycle=phase_attempts,
+        completed_pairs_by_phase={
+            phase_id: tuple(sorted(pairs)) for phase_id, pairs in completed_pairs_by_phase.items()
+        },
+        emitted_phase_started_ids=tuple(sorted(emitted_phase_started_ids)),
+        emitted_phase_completed_ids=tuple(sorted(emitted_phase_completed_ids)),
+        emitted_phase_deferred_keys=tuple(sorted(emitted_phase_deferred_keys)),
+        scope_event_seen=scope_event_seen,
         last_sequence=last_seq,
+        phase_mode=phase_mode,
+        phase_ids=phase_ids,
+        current_phase_index=current_phase_index,
     )
 
 
@@ -1569,9 +2148,343 @@ def resolve_task_id(task_id: Optional[str], intent: Optional[str]) -> str:
     fatal("[!] FATAL: Provide --task-id or --intent so Superloop can select a task workspace.")
 
 
+def load_phase_plan_or_fatal(task_dir: Path, task_id: str) -> Optional[PhasePlan]:
+    plan_path = phase_plan_file(task_dir)
+    try:
+        return load_phase_plan(plan_path, task_id)
+    except PhasePlanError as exc:
+        fatal(f"[!] FATAL: Invalid explicit phase_plan.yaml at {plan_path}: {exc}")
+
+
+def enforce_phase_parser_preconditions(
+    *,
+    task_dir: Path,
+    enabled_pairs: Sequence[str],
+):
+    if yaml is not None:
+        return
+    phased_enabled = any(pair in PHASED_PAIRS for pair in enabled_pairs)
+    if not phased_enabled:
+        return
+
+    explicit_plan_exists = phase_plan_file(task_dir).exists()
+    plan_enabled = "plan" in enabled_pairs
+
+    if explicit_plan_exists or plan_enabled:
+        fatal(
+            "[!] FATAL: PyYAML is required for explicit phase-plan workflows. "
+            "Install dependencies from requirements.txt before running phased plan/implement/test flows."
+        )
+
+
+def resolve_active_phase_selection(
+    *,
+    task_dir: Path,
+    task_id: str,
+    request_file: Path,
+    task_meta_file: Path,
+    phase_id: Optional[str],
+    phase_mode: str,
+    enabled_pairs: Sequence[str],
+    resume_checkpoint: Optional[ResumeCheckpoint],
+    is_resume: bool,
+) -> ResolvedPhaseSelection:
+    explicit_plan = load_phase_plan_or_fatal(task_dir, task_id)
+    if resume_checkpoint is not None and resume_checkpoint.phase_ids:
+        stored_plan = explicit_plan if explicit_plan is not None else build_implicit_phase_plan(task_id, request_file)
+        try:
+            return restore_phase_selection(stored_plan, resume_checkpoint.phase_ids, resume_checkpoint.phase_mode)
+        except PhasePlanError as exc:
+            fatal(f"[!] FATAL: Unable to restore phase selection for resumed run: {exc}")
+
+    if is_resume:
+        stored_mode, stored_phase_ids, _stored_phase_index = active_phase_selection_from_meta(task_meta_file)
+        if stored_phase_ids:
+            stored_plan = explicit_plan if explicit_plan is not None else build_implicit_phase_plan(task_id, request_file)
+            try:
+                return restore_phase_selection(stored_plan, stored_phase_ids, stored_mode)
+            except PhasePlanError as exc:
+                fatal(f"[!] FATAL: Unable to restore phase selection from task metadata: {exc}")
+
+    plan = explicit_plan if explicit_plan is not None else build_implicit_phase_plan(task_id, request_file)
+    try:
+        return resolve_phase_selection(plan, phase_id, phase_mode, enabled_pairs)
+    except PhasePlanError as exc:
+        fatal(f"[!] FATAL: {exc}")
+
+
+def execute_pair_cycles(
+    *,
+    pair_cfg: PairConfig,
+    pair: str,
+    prompt_file: Path,
+    verifier_prompt_file: Path,
+    criteria_file: Path,
+    feedback_file: Path,
+    root: Path,
+    codex_command: CodexCommandConfig,
+    run_id: str,
+    run_paths: Dict[str, Path],
+    paths: Dict[str, Path],
+    recorder: EventRecorder,
+    task_root_rel: str,
+    use_git: bool,
+    active_phase_selection: Optional[ResolvedPhaseSelection],
+    enabled_pairs: Sequence[str],
+    args: argparse.Namespace,
+    resume_checkpoint: Optional[ResumeCheckpoint],
+    use_resume_state: bool,
+) -> Tuple[str, int]:
+    print(f"\n===== Pair: {PAIR_LABELS[pair]} =====")
+    append_run_log(paths["run_log"], f"Started pair `{pair}`", run_id=run_id, pair=pair)
+    append_run_log(run_paths["run_log"], f"Started pair `{pair}`", run_id=run_id, pair=pair)
+    recorder.emit(
+        "pair_started",
+        pair=pair,
+        phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
+    )
+
+    cycle = 0
+    attempt_counts: Dict[int, int] = {}
+    active_phase_id = active_phase_selection.phase_ids[0] if active_phase_selection else None
+    if use_resume_state and resume_checkpoint is not None:
+        if active_phase_id is None:
+            cycle = resume_checkpoint.cycle_by_pair.get(pair, 0)
+            for (attempt_pair, attempt_cycle), attempt_value in resume_checkpoint.attempts_by_pair_cycle.items():
+                if attempt_pair == pair:
+                    attempt_counts[attempt_cycle] = attempt_value
+        else:
+            cycle = resume_checkpoint.cycle_by_phase_pair.get((active_phase_id, pair), 0)
+            for (attempt_phase_id, attempt_pair, attempt_cycle), attempt_value in (
+                resume_checkpoint.attempts_by_phase_pair_cycle.items()
+            ):
+                if attempt_phase_id == active_phase_id and attempt_pair == pair:
+                    attempt_counts[attempt_cycle] = attempt_value
+
+    while cycle < pair_cfg.max_iterations:
+        cycle_num = cycle + 1
+        attempt_counts[cycle_num] = attempt_counts.get(cycle_num, 0) + 1
+        attempt_num = attempt_counts[cycle_num]
+        print(f"\n--- {pair} cycle {cycle_num}/{pair_cfg.max_iterations} ---")
+        recorder.emit(
+            "cycle_started",
+            pair=pair,
+            cycle=cycle_num,
+            attempt=attempt_num,
+            phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
+        )
+        pair_tracked = tracked_superloop_paths(task_root_rel, pair)
+        if use_git:
+            commit_tracked_changes(root, f"superloop: pre-cycle snapshot ({pair} #{cycle_num})", pair_tracked)
+
+        producer_baseline = phase_snapshot_ref(root) if use_git else None
+
+        producer_stdout = run_codex_phase(
+            codex_command,
+            root,
+            prompt_file,
+            "producer",
+            pair,
+            cycle_num,
+            attempt_num,
+            run_id,
+            run_paths["request_file"],
+            run_paths["session_file"],
+            run_paths["raw_phase_log"],
+            paths["raw_phase_log"],
+            active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
+        )
+        recorder.emit(
+            "phase_finished",
+            pair=pair,
+            phase="producer",
+            cycle=cycle_num,
+            attempt=attempt_num,
+            empty_output=(not producer_stdout.strip()),
+            phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
+        )
+        if not producer_stdout.strip():
+            recorder.emit("phase_output_empty", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
+            warn(f"{pair} producer returned empty stdout (cycle {cycle_num}, attempt {attempt_num}).")
+        producer_control = parse_phase_control(producer_stdout, "producer", pair)
+        producer_decision = decide_producer_control(producer_control)
+        producer_delta = changed_paths_from_snapshot(root, producer_baseline) if use_git else set()
+
+        if producer_decision.action == "question":
+            recorder.emit("question", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
+            producer_question = format_question(producer_control)
+            if args.full_auto_answers:
+                answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], producer_question)
+                print(f"[+] Auto-answered producer question: {answer}")
+                answer_source = "auto"
+            else:
+                answer = ask_human(producer_question)
+                answer_source = "human"
+            append_clarification(
+                run_paths["raw_phase_log"],
+                paths["raw_phase_log"],
+                run_paths["session_file"],
+                pair,
+                "producer",
+                cycle_num,
+                attempt_num,
+                producer_question,
+                answer,
+                run_id,
+                answer_source,
+            )
+            if use_git:
+                commit_tracked_changes(root, f"superloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
+            continue
+
+        if producer_decision.action == "ignore_promise":
+            warn(
+                f"{pair} producer emitted <promise>{producer_control.promise}</promise>; ignoring because verifier controls completion."
+            )
+
+        if use_git and producer_delta:
+            commit_paths(root, f"superloop: producer edits ({pair} #{cycle_num})", producer_delta)
+        else:
+            if use_git:
+                print("[-] Producer made no changes.")
+            else:
+                print("[-] Change detection skipped in --no-git mode.")
+
+        verifier_baseline = phase_snapshot_ref(root) if use_git else None
+
+        verifier_stdout = run_codex_phase(
+            codex_command,
+            root,
+            verifier_prompt_file,
+            "verifier",
+            pair,
+            cycle_num,
+            attempt_num,
+            run_id,
+            run_paths["request_file"],
+            run_paths["session_file"],
+            run_paths["raw_phase_log"],
+            paths["raw_phase_log"],
+            active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
+        )
+        recorder.emit(
+            "phase_finished",
+            pair=pair,
+            phase="verifier",
+            cycle=cycle_num,
+            attempt=attempt_num,
+            empty_output=(not verifier_stdout.strip()),
+            phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
+        )
+        if not verifier_stdout.strip():
+            recorder.emit("phase_output_empty", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
+            warn(f"{pair} verifier returned empty stdout (cycle {cycle_num}, attempt {attempt_num}).")
+        verifier_control = parse_phase_control(verifier_stdout, "verifier", pair)
+        verifier_decision = decide_verifier_control(
+            verifier_control,
+            criteria_checked=criteria_all_checked(criteria_file),
+        )
+        verifier_delta = changed_paths_from_snapshot(root, verifier_baseline) if use_git else set()
+
+        if verifier_decision.action == "question":
+            recorder.emit("question", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
+            verifier_question = format_question(verifier_control)
+            if args.full_auto_answers:
+                answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], verifier_question)
+                print(f"[+] Auto-answered verifier question: {answer}")
+                answer_source = "auto"
+            else:
+                answer = ask_human(verifier_question)
+                answer_source = "human"
+            append_clarification(
+                run_paths["raw_phase_log"],
+                paths["raw_phase_log"],
+                run_paths["session_file"],
+                pair,
+                "verifier",
+                cycle_num,
+                attempt_num,
+                verifier_question,
+                answer,
+                run_id,
+                answer_source,
+            )
+            if use_git:
+                commit_tracked_changes(root, f"superloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
+            continue
+
+        violations = verifier_scope_violations(pair, verifier_delta, task_root_rel) if use_git else []
+        if use_git and violations:
+            preview = ", ".join(violations[:8])
+            if len(violations) > 8:
+                preview += ", ..."
+            warn(
+                f"{pair} verifier edited files outside recommended scope ({task_root_rel}/{pair}/): {preview}. Continuing in lax guard mode."
+            )
+
+        if verifier_control.promise is None:
+            recorder.emit("missing_promise_default", pair=pair, cycle=cycle_num, attempt=attempt_num)
+            with feedback_file.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"\n\n## System Warning (cycle {cycle_num})\n"
+                    f"{verifier_decision.warning}\n"
+                )
+            verifier_delta.add(repo_relative_path(root, feedback_file))
+
+        if verifier_control.promise == PROMISE_COMPLETE and verifier_decision.warning:
+            warn(f"{pair} {verifier_decision.warning}")
+            verifier_delta.add(repo_relative_path(root, feedback_file))
+
+        if verifier_decision.action == "complete":
+            print(f"[SUCCESS] Pair `{pair}` completed.")
+            append_run_log(paths["run_log"], f"Completed pair `{pair}` in {cycle_num} cycles", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
+            append_run_log(run_paths["run_log"], f"Completed pair `{pair}` in {cycle_num} cycles", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
+            recorder.emit(
+                "pair_completed",
+                pair=pair,
+                cycle=cycle_num,
+                attempt=attempt_num,
+                phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
+            )
+            if use_git:
+                commit_paths(root, f"superloop: pair complete ({pair})", set(pair_tracked) | verifier_delta)
+            return "complete", 0
+
+        if verifier_decision.action == "blocked":
+            append_run_log(paths["run_log"], f"Blocked in pair `{pair}` cycle {cycle_num}", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
+            append_run_log(run_paths["run_log"], f"Blocked in pair `{pair}` cycle {cycle_num}", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
+            recorder.emit("blocked", pair=pair, cycle=cycle_num, attempt=attempt_num)
+            if use_git:
+                commit_paths(root, f"superloop: blocked ({pair} #{cycle_num})", set(pair_tracked) | verifier_delta)
+            print(f"[BLOCKED] Pair `{pair}` emitted BLOCKED.", file=sys.stderr)
+            return "blocked", 2
+
+        if use_git:
+            commit_paths(root, f"superloop: verifier feedback ({pair} #{cycle_num})", verifier_delta)
+        else:
+            print("[-] Change detection skipped in --no-git mode.")
+        cycle += 1
+        time.sleep(2)
+
+    append_run_log(paths["run_log"], f"Failed pair `{pair}` after max cycles", run_id=run_id, pair=pair)
+    append_run_log(run_paths["run_log"], f"Failed pair `{pair}` after max cycles", run_id=run_id, pair=pair)
+    recorder.emit("pair_failed", pair=pair)
+    if use_git:
+        commit_paths(root, f"superloop: failed ({pair} max iterations)", [repo_relative_path(root, paths["run_log"])])
+    print(f"[FAILED] Pair `{pair}` reached max iterations without COMPLETE.", file=sys.stderr)
+    return "failed", 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Superloop: optional strategy-to-execution Codex loop orchestration")
     parser.add_argument("--pairs", type=str, default="plan,implement,test", help="Comma list from: plan,implement,test")
+    parser.add_argument("--phase-id", type=str, help="Explicit phase id for implement/test execution when phase_plan.yaml exists")
+    parser.add_argument(
+        "--phase-mode",
+        choices=[PHASE_MODE_SINGLE, PHASE_MODE_UP_TO],
+        default=PHASE_MODE_SINGLE,
+        help="Phase targeting mode for implement/test execution",
+    )
     parser.add_argument("--max-iterations", type=int, default=15, help="Maximum verifier cycles per enabled pair")
     parser.add_argument("--model", type=str, default="gpt-5.4", help="Codex model")
     parser.add_argument("--workspace", type=str, default=".", help="Repository/workspace root")
@@ -1637,6 +2550,7 @@ def main() -> int:
     check_dependencies(require_git=use_git)
     codex_command = resolve_codex_exec_command(args.model)
     pair_configs = parse_pairs(args.pairs, args.max_iterations)
+    enabled_pairs = [p.name for p in pair_configs if p.enabled]
 
     if use_git:
         repo_exists = has_git_repo(root)
@@ -1648,6 +2562,7 @@ def main() -> int:
 
         ensure_git_commit_ready(root)
     paths = ensure_workspace(root, task_id, args.intent, args.intent_mode)
+    enforce_phase_parser_preconditions(task_dir=paths["task_dir"], enabled_pairs=enabled_pairs)
     task_root_rel = str(paths["task_root_rel"])
     task_scoped_paths = tracked_superloop_paths(task_root_rel)
     resolved_request_text = task_request_text(paths["task_meta_file"], paths["legacy_context_file"])
@@ -1676,7 +2591,6 @@ def main() -> int:
                 request_notice,
                 entry="request_recovery",
             )
-        enabled_pairs = [p.name for p in pair_configs if p.enabled]
         resume_checkpoint = load_resume_checkpoint(run_paths["events_file"], enabled_pairs)
         recorder = EventRecorder(run_id=run_id, events_file=run_paths["events_file"], sequence=resume_checkpoint.last_sequence)
         if run_paths["session_file"].exists():
@@ -1717,14 +2631,14 @@ def main() -> int:
     print(f"[*] Workspace root: {root}")
     print(f"[*] Task ID: {task_id}")
     print(f"[*] Task root: {task_root_rel}")
-    print(f"[*] Enabled pairs: {', '.join([p.name for p in pair_configs if p.enabled])}")
+    print(f"[*] Enabled pairs: {', '.join(enabled_pairs)}")
     print(f"[*] Run ID: {run_id}")
     append_run_log(paths["run_log"], "Run resumed" if args.resume else "Run started", run_id=run_id)
     append_run_log(run_paths["run_log"], "Run resumed" if args.resume else "Run started", run_id=run_id)
     recorder.emit(
         "run_resumed" if args.resume else "run_started",
         workspace=str(root),
-        pairs=[p.name for p in pair_configs if p.enabled],
+        pairs=enabled_pairs,
         max_iterations=args.max_iterations,
         use_git=use_git,
         task_id=task_id,
@@ -1736,7 +2650,7 @@ def main() -> int:
         "run_state",
         (
             f"workspace={root}\n"
-            f"pairs={','.join([p.name for p in pair_configs if p.enabled])}\n"
+            f"pairs={','.join(enabled_pairs)}\n"
             f"request_file={run_paths['request_file']}\n"
             f"session_mode={session_state.mode if session_state else 'persistent'}"
         ),
@@ -1748,7 +2662,7 @@ def main() -> int:
         "run_state",
         (
             f"workspace={root}\n"
-            f"pairs={','.join([p.name for p in pair_configs if p.enabled])}\n"
+            f"pairs={','.join(enabled_pairs)}\n"
             f"request_file={run_paths['request_file']}\n"
             f"session_mode={session_state.mode if session_state else 'persistent'}"
         ),
@@ -1756,234 +2670,228 @@ def main() -> int:
     )
 
     try:
-        enabled_pair_index = -1
-        for pair_cfg in pair_configs:
-            if not pair_cfg.enabled:
-                continue
-            enabled_pair_index += 1
-            if resume_checkpoint is not None and enabled_pair_index < resume_checkpoint.pair_start_index:
-                continue
+        active_phase_selection: Optional[ResolvedPhaseSelection] = None
+        phase_scope_emitted = False
+        completed_phase_pairs: Dict[str, Set[str]] = (
+            {phase_id: set(pairs) for phase_id, pairs in resume_checkpoint.completed_pairs_by_phase.items()}
+            if resume_checkpoint is not None
+            else {}
+        )
+        phase_started_ids: Set[str] = set(
+            resume_checkpoint.emitted_phase_started_ids if resume_checkpoint is not None else ()
+        )
+        phase_completed_ids: Set[str] = set(
+            resume_checkpoint.emitted_phase_completed_ids if resume_checkpoint is not None else ()
+        )
+        phase_deferred_keys: Set[Tuple[str, str]] = set(
+            resume_checkpoint.emitted_phase_deferred_keys if resume_checkpoint is not None else ()
+        )
+        pair_by_name = {cfg.name: cfg for cfg in pair_configs}
 
-            pair = pair_cfg.name
-            pair_dir = paths[f"pair_{pair}"]
-            prompt_file = pair_dir / "prompt.md"
-            verifier_prompt_file = pair_dir / "verifier_prompt.md"
-            criteria_file = pair_dir / "criteria.md"
-            feedback_file = pair_dir / "feedback.md"
-
-            print(f"\n===== Pair: {PAIR_LABELS[pair]} =====")
-            append_run_log(paths["run_log"], f"Started pair `{pair}`", run_id=run_id, pair=pair)
-            append_run_log(run_paths["run_log"], f"Started pair `{pair}`", run_id=run_id, pair=pair)
-            recorder.emit("pair_started", pair=pair)
-
-            cycle = 0
-            attempt_counts: Dict[int, int] = {}
-            if resume_checkpoint is not None:
-                cycle = resume_checkpoint.cycle_by_pair.get(pair, 0)
-                for (attempt_pair, attempt_cycle), attempt_value in resume_checkpoint.attempts_by_pair_cycle.items():
-                    if attempt_pair == pair:
-                        attempt_counts[attempt_cycle] = attempt_value
-            while cycle < pair_cfg.max_iterations:
-                cycle_num = cycle + 1
-                attempt_counts[cycle_num] = attempt_counts.get(cycle_num, 0) + 1
-                attempt_num = attempt_counts[cycle_num]
-                print(f"\n--- {pair} cycle {cycle_num}/{pair_cfg.max_iterations} ---")
-                recorder.emit("cycle_started", pair=pair, cycle=cycle_num, attempt=attempt_num)
-                pair_tracked = tracked_superloop_paths(task_root_rel, pair)
-                if use_git:
-                    commit_tracked_changes(root, f"superloop: pre-cycle snapshot ({pair} #{cycle_num})", pair_tracked)
-
-                producer_baseline = phase_snapshot_ref(root) if use_git else None
-
-                producer_stdout = run_codex_phase(
-                    codex_command,
-                    root,
-                    prompt_file,
-                    "producer",
-                    pair,
-                    cycle_num,
-                    attempt_num,
-                    run_id,
-                    run_paths["request_file"],
-                    run_paths["session_file"],
-                    run_paths["raw_phase_log"],
-                    paths["raw_phase_log"],
-                )
-                recorder.emit(
-                    "phase_finished",
-                    pair=pair,
-                    phase="producer",
-                    cycle=cycle_num,
-                    attempt=attempt_num,
-                    empty_output=(not producer_stdout.strip()),
-                )
-                if not producer_stdout.strip():
-                    recorder.emit("phase_output_empty", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
-                    warn(f"{pair} producer returned empty stdout (cycle {cycle_num}, attempt {attempt_num}).")
-                producer_control = parse_phase_control(producer_stdout, "producer", pair)
-                producer_decision = decide_producer_control(producer_control)
-                producer_delta = changed_paths_from_snapshot(root, producer_baseline) if use_git else set()
-
-                if producer_decision.action == "question":
-                    recorder.emit("question", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
-                    producer_question = format_question(producer_control)
-                    if args.full_auto_answers:
-                        answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], producer_question)
-                        print(f"[+] Auto-answered producer question: {answer}")
-                        answer_source = "auto"
-                    else:
-                        answer = ask_human(producer_question)
-                        answer_source = "human"
-                    append_clarification(
-                        run_paths["raw_phase_log"],
-                        paths["raw_phase_log"],
-                        run_paths["session_file"],
-                        pair,
-                        "producer",
-                        cycle_num,
-                        attempt_num,
-                        producer_question,
-                        answer,
-                        run_id,
-                        answer_source,
-                    )
-                    if use_git:
-                        commit_tracked_changes(root, f"superloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
-                    continue
-
-                if producer_decision.action == "ignore_promise":
-                    warn(
-                        f"{pair} producer emitted <promise>{producer_control.promise}</promise>; ignoring because verifier controls completion."
-                    )
-
-                if use_git and producer_delta:
-                    commit_paths(root, f"superloop: producer edits ({pair} #{cycle_num})", producer_delta)
-                else:
-                    if use_git:
-                        print("[-] Producer made no changes.")
-                    else:
-                        print("[-] Change detection skipped in --no-git mode.")
-
-                verifier_baseline = phase_snapshot_ref(root) if use_git else None
-
-                verifier_stdout = run_codex_phase(
-                    codex_command,
-                    root,
-                    verifier_prompt_file,
-                    "verifier",
-                    pair,
-                    cycle_num,
-                    attempt_num,
-                    run_id,
-                    run_paths["request_file"],
-                    run_paths["session_file"],
-                    run_paths["raw_phase_log"],
-                    paths["raw_phase_log"],
-                )
-                recorder.emit(
-                    "phase_finished",
-                    pair=pair,
-                    phase="verifier",
-                    cycle=cycle_num,
-                    attempt=attempt_num,
-                    empty_output=(not verifier_stdout.strip()),
-                )
-                if not verifier_stdout.strip():
-                    recorder.emit("phase_output_empty", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
-                    warn(f"{pair} verifier returned empty stdout (cycle {cycle_num}, attempt {attempt_num}).")
-                verifier_control = parse_phase_control(verifier_stdout, "verifier", pair)
-                verifier_decision = decide_verifier_control(
-                    verifier_control,
-                    criteria_checked=criteria_all_checked(criteria_file),
-                )
-                verifier_delta = changed_paths_from_snapshot(root, verifier_baseline) if use_git else set()
-
-                if verifier_decision.action == "question":
-                    recorder.emit("question", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
-                    verifier_question = format_question(verifier_control)
-                    if args.full_auto_answers:
-                        answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], verifier_question)
-                        print(f"[+] Auto-answered verifier question: {answer}")
-                        answer_source = "auto"
-                    else:
-                        answer = ask_human(verifier_question)
-                        answer_source = "human"
-                    append_clarification(
-                        run_paths["raw_phase_log"],
-                        paths["raw_phase_log"],
-                        run_paths["session_file"],
-                        pair,
-                        "verifier",
-                        cycle_num,
-                        attempt_num,
-                        verifier_question,
-                        answer,
-                        run_id,
-                        answer_source,
-                    )
-                    if use_git:
-                        commit_tracked_changes(root, f"superloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
-                    continue
-
-                violations = verifier_scope_violations(pair, verifier_delta, task_root_rel) if use_git else []
-                if use_git and violations:
-                    preview = ", ".join(violations[:8])
-                    if len(violations) > 8:
-                        preview += ", ..."
-                    warn(
-                        f"{pair} verifier edited files outside recommended scope ({task_root_rel}/{pair}/): {preview}. Continuing in lax guard mode."
-                    )
-
-                if verifier_control.promise is None:
-                    recorder.emit("missing_promise_default", pair=pair, cycle=cycle_num, attempt=attempt_num)
-                    with feedback_file.open("a", encoding="utf-8") as f:
-                        f.write(
-                            f"\n\n## System Warning (cycle {cycle_num})\n"
-                            f"{verifier_decision.warning}\n"
-                        )
-                    verifier_delta.add(repo_relative_path(root, feedback_file))
-
-                if verifier_control.promise == PROMISE_COMPLETE and verifier_decision.warning:
-                    warn(f"{pair} {verifier_decision.warning}")
-                    verifier_delta.add(repo_relative_path(root, feedback_file))
-
-                if verifier_decision.action == "complete":
-                    print(f"[SUCCESS] Pair `{pair}` completed.")
-                    append_run_log(paths["run_log"], f"Completed pair `{pair}` in {cycle_num} cycles", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
-                    append_run_log(run_paths["run_log"], f"Completed pair `{pair}` in {cycle_num} cycles", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
-                    recorder.emit("pair_completed", pair=pair, cycle=cycle_num, attempt=attempt_num)
-                    if use_git:
-                        commit_paths(root, f"superloop: pair complete ({pair})", set(pair_tracked) | verifier_delta)
-                    break
-
-                if verifier_decision.action == "blocked":
-                    append_run_log(paths["run_log"], f"Blocked in pair `{pair}` cycle {cycle_num}", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
-                    append_run_log(run_paths["run_log"], f"Blocked in pair `{pair}` cycle {cycle_num}", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
-                    recorder.emit("blocked", pair=pair, cycle=cycle_num, attempt=attempt_num)
-                    if use_git:
-                        commit_paths(root, f"superloop: blocked ({pair} #{cycle_num})", set(pair_tracked) | verifier_delta)
-                    print(f"[BLOCKED] Pair `{pair}` emitted BLOCKED.", file=sys.stderr)
-                    run_status = "blocked"
-                    exit_code = 2
-                    return exit_code
-
-                # INCOMPLETE
-                if use_git:
-                    commit_paths(root, f"superloop: verifier feedback ({pair} #{cycle_num})", verifier_delta)
-                else:
-                    print("[-] Change detection skipped in --no-git mode.")
-                cycle += 1
-                time.sleep(2)
-            else:
-                append_run_log(paths["run_log"], f"Failed pair `{pair}` after max cycles", run_id=run_id, pair=pair)
-                append_run_log(run_paths["run_log"], f"Failed pair `{pair}` after max cycles", run_id=run_id, pair=pair)
-                recorder.emit("pair_failed", pair=pair)
-                if use_git:
-                    commit_paths(root, f"superloop: failed ({pair} max iterations)", [repo_relative_path(root, paths["run_log"])])
-                print(f"[FAILED] Pair `{pair}` reached max iterations without COMPLETE.", file=sys.stderr)
-                run_status = "failed"
-                exit_code = 1
+        plan_cfg = pair_by_name.get("plan")
+        should_run_plan_pair = plan_cfg is not None and plan_cfg.enabled
+        if should_run_plan_pair and args.resume and resume_checkpoint is not None:
+            try:
+                plan_pair_index = enabled_pairs.index("plan")
+            except ValueError:
+                plan_pair_index = -1
+            should_run_plan_pair = plan_pair_index >= 0 and plan_pair_index >= resume_checkpoint.pair_start_index
+        if should_run_plan_pair:
+            plan_result, plan_exit = execute_pair_cycles(
+                pair_cfg=plan_cfg,
+                pair="plan",
+                prompt_file=paths["pair_plan"] / "prompt.md",
+                verifier_prompt_file=paths["pair_plan"] / "verifier_prompt.md",
+                criteria_file=paths["pair_plan"] / "criteria.md",
+                feedback_file=paths["pair_plan"] / "feedback.md",
+                root=root,
+                codex_command=codex_command,
+                run_id=run_id,
+                run_paths=run_paths,
+                paths=paths,
+                recorder=recorder,
+                task_root_rel=task_root_rel,
+                use_git=use_git,
+                active_phase_selection=None,
+                enabled_pairs=enabled_pairs,
+                args=args,
+                resume_checkpoint=resume_checkpoint,
+                use_resume_state=bool(args.resume and (resume_checkpoint is not None)),
+            )
+            if plan_result == "blocked":
+                run_status = "blocked"
+                exit_code = plan_exit
                 return exit_code
+            if plan_result == "failed":
+                run_status = "failed"
+                exit_code = plan_exit
+                return exit_code
+
+        phased_enabled = [pair for pair in ("implement", "test") if pair_by_name.get(pair) and pair_by_name[pair].enabled]
+        if phased_enabled:
+            active_phase_selection = resolve_active_phase_selection(
+                task_dir=paths["task_dir"],
+                task_id=task_id,
+                request_file=run_paths["request_file"],
+                task_meta_file=paths["task_meta_file"],
+                phase_id=args.phase_id,
+                phase_mode=args.phase_mode,
+                enabled_pairs=enabled_pairs,
+                resume_checkpoint=resume_checkpoint,
+                is_resume=args.resume,
+            )
+            if args.resume:
+                starting_phase_index = resolve_resume_start_phase_index(
+                    active_phase_selection,
+                    phased_enabled,
+                    resume_checkpoint.completed_pairs_by_phase if resume_checkpoint is not None else {},
+                )
+            else:
+                starting_phase_index = 0
+            if starting_phase_index < 0:
+                starting_phase_index = 0
+            if starting_phase_index > len(active_phase_selection.phase_ids):
+                starting_phase_index = len(active_phase_selection.phase_ids)
+            persist_phase_selection(
+                paths["task_meta_file"],
+                active_phase_selection,
+                run_id,
+                phase_plan_file(paths["task_dir"]),
+                current_phase_index=starting_phase_index,
+            )
+            if args.resume and resume_checkpoint is not None:
+                phase_scope_emitted = resume_scope_matches(resume_checkpoint, active_phase_selection)
+            if not phase_scope_emitted:
+                recorder.emit(
+                    "phase_scope_resolved",
+                    phase_mode=active_phase_selection.phase_mode,
+                    phase_ids=list(active_phase_selection.phase_ids),
+                    explicit=active_phase_selection.explicit,
+                    current_phase_index=starting_phase_index,
+                )
+                selection_body = (
+                    f"phase_mode={active_phase_selection.phase_mode}\n"
+                    f"phase_ids={','.join(active_phase_selection.phase_ids)}\n"
+                    f"explicit={active_phase_selection.explicit}\n"
+                    f"current_phase_index={starting_phase_index}"
+                )
+                append_runtime_raw_log(paths["raw_phase_log"], run_id, "phase_scope_resolved", selection_body)
+                append_runtime_raw_log(run_paths["raw_phase_log"], run_id, "phase_scope_resolved", selection_body)
+                phase_scope_emitted = True
+
+            for phase_index in range(starting_phase_index, len(active_phase_selection.phase_ids)):
+                current_phase = active_phase_selection.phases[phase_index]
+                current_phase_selection = ResolvedPhaseSelection(
+                    phase_mode=active_phase_selection.phase_mode if active_phase_selection.phase_mode == PHASE_MODE_UP_TO else PHASE_MODE_SINGLE,
+                    phase_ids=(current_phase.phase_id,),
+                    phases=(current_phase,),
+                    explicit=active_phase_selection.explicit,
+                )
+                update_active_phase_index(paths["task_meta_file"], phase_index, current_phase.phase_id)
+                if current_phase.phase_id not in phase_started_ids:
+                    mark_phase_status(
+                        paths["task_meta_file"],
+                        [current_phase.phase_id],
+                        PHASE_STATUS_IN_PROGRESS,
+                        run_id=run_id,
+                    )
+                    recorder.emit(
+                        "phase_started",
+                        phase_id=current_phase.phase_id,
+                        phase_mode=active_phase_selection.phase_mode,
+                    )
+                    phase_started_ids.add(current_phase.phase_id)
+
+                for pair in phased_enabled:
+                    pair_cfg = pair_by_name[pair]
+                    assert pair_cfg is not None
+                    if args.resume and phase_pair_completed(completed_phase_pairs, current_phase.phase_id, pair):
+                        continue
+                    if pair == "test" and not phase_pair_completed(completed_phase_pairs, current_phase.phase_id, "implement"):
+                        fatal(
+                            f"[!] FATAL: Cannot run test completion for phase {current_phase.phase_id!r} "
+                            "before implement completion has been recorded for that phase."
+                        )
+
+                    result, result_exit = execute_pair_cycles(
+                        pair_cfg=pair_cfg,
+                        pair=pair,
+                        prompt_file=paths[f"pair_{pair}"] / "prompt.md",
+                        verifier_prompt_file=paths[f"pair_{pair}"] / "verifier_prompt.md",
+                        criteria_file=paths[f"pair_{pair}"] / "criteria.md",
+                        feedback_file=paths[f"pair_{pair}"] / "feedback.md",
+                        root=root,
+                        codex_command=codex_command,
+                        run_id=run_id,
+                        run_paths=run_paths,
+                        paths=paths,
+                        recorder=recorder,
+                        task_root_rel=task_root_rel,
+                        use_git=use_git,
+                        active_phase_selection=current_phase_selection,
+                        enabled_pairs=enabled_pairs,
+                        args=args,
+                        resume_checkpoint=resume_checkpoint,
+                        use_resume_state=bool(args.resume and phase_index == starting_phase_index),
+                    )
+                    resume_checkpoint = None
+                    if result == "blocked":
+                        mark_phase_status(
+                            paths["task_meta_file"],
+                            [current_phase.phase_id],
+                            PHASE_STATUS_BLOCKED,
+                            run_id=run_id,
+                            pair=pair,
+                        )
+                        recorder.emit(
+                            "phase_blocked",
+                            pair=pair,
+                            phase_id=current_phase.phase_id,
+                            phase_mode=active_phase_selection.phase_mode,
+                        )
+                        run_status = "blocked"
+                        exit_code = result_exit
+                        return exit_code
+                    if result == "failed":
+                        run_status = "failed"
+                        exit_code = result_exit
+                        return exit_code
+
+                    mark_phase_pair_completed(completed_phase_pairs, current_phase.phase_id, pair)
+                    if pair == "implement" and "test" in phased_enabled:
+                        deferred_key = (current_phase.phase_id, pair)
+                        if deferred_key not in phase_deferred_keys:
+                            recorder.emit(
+                                "phase_deferred",
+                                pair=pair,
+                                phase_mode=active_phase_selection.phase_mode,
+                                phase_id=current_phase.phase_id,
+                                reason="awaiting enabled test pair completion",
+                            )
+                            phase_deferred_keys.add(deferred_key)
+                        continue
+                    if pair == "test" or ("test" not in phased_enabled and pair == "implement"):
+                        mark_phase_status(
+                            paths["task_meta_file"],
+                            [current_phase.phase_id],
+                            PHASE_STATUS_COMPLETED,
+                            run_id=run_id,
+                            pair=pair,
+                        )
+                        if current_phase.phase_id not in phase_completed_ids:
+                            recorder.emit(
+                                "phase_completed",
+                                pair=pair,
+                                phase_id=current_phase.phase_id,
+                                phase_mode=active_phase_selection.phase_mode,
+                            )
+                            phase_completed_ids.add(current_phase.phase_id)
+
+                update_active_phase_index(
+                    paths["task_meta_file"],
+                    phase_index + 1,
+                    active_phase_selection.phase_ids[phase_index + 1] if phase_index + 1 < len(active_phase_selection.phase_ids) else None,
+                )
 
         append_run_log(paths["run_log"], "All enabled pairs completed", run_id=run_id)
         append_run_log(run_paths["run_log"], "All enabled pairs completed", run_id=run_id)

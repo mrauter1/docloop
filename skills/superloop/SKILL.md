@@ -38,6 +38,8 @@ superloop --workspace . --resume --run-id run-YYYYMMDDTHHMMSSZ-xxxxxxxx
 - `--intent` seeds the task request.
 - `--intent-mode {replace,append,preserve}` controls how new intent updates the task request.
 - `--pairs` selects any subset of `plan,implement,test`.
+- `--phase-id` optionally selects an explicit phase for `implement` / `test` when `plan/phase_plan.yaml` exists; omitting it runs all explicit phases in order.
+- `--phase-mode {single,up-to}` chooses a single phase or the ordered prefix through `--phase-id`.
 - `--resume` and `--run-id` continue an existing run.
 - `--full-auto-answers` lets Superloop answer agent questions through an extra Codex pass.
 - `--no-git` disables git checkpointing and change detection.
@@ -52,6 +54,7 @@ Important task-level files:
 - `run_log.md`
 - `raw_phase_log.md`
 - `plan/plan.md`
+- `plan/phase_plan.yaml`
 - `implement/implementation_notes.md`
 - `test/test_strategy.md`
 
@@ -67,8 +70,10 @@ Important run-level files:
 ## Operating guidance
 
 - Use `plan,implement,test` unless the task is already tightly planned.
+- When `plan/phase_plan.yaml` exists, omit `--phase-id` to execute the full ordered plan, or provide `--phase-id` to target one phase or an `up-to` prefix.
+- If `plan/phase_plan.yaml` does not exist, Superloop falls back to one implicit legacy phase for `implement` / `test`.
 - Prefer explicit `--task-id` values so related runs stay grouped.
-- Resume by `--run-id` when possible.
+- Resume by `--run-id` when possible; without an explicit `--phase-id`, Superloop resumes at the first incomplete phase in the stored or resolved selection.
 - Read the run-scoped `raw_phase_log.md` to understand what the agent actually did across phases.
 - Read `events.jsonl` when precise checkpoint status matters.
 - If `--no-git` is used, expect reduced change-detection visibility in logs.

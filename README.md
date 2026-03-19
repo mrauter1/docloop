@@ -205,9 +205,11 @@ python3 superloop.py --pairs plan,implement,test
 - `--workspace PATH`: Repository root to operate on (default `.`)
 - `--max-iterations N`: Maximum verifier cycles per enabled pair (default `15`)
 - `--model MODEL`: Codex model passed to `codex exec` (default `gpt-5.4`)
-- `--intent TEXT`: Optional initial product intent seeded into `.superloop/context.md`
+- `--intent TEXT`: Optional initial product intent seeded into the task request stored in `.superloop/tasks/<task-id>/task.json`
 - `--task-id ID`: Task workspace slug under `.superloop/tasks/` (new runs require `--task-id` or `--intent`)
 - `--intent-mode {replace,append,preserve}`: How `--intent` mutates task context (default `preserve`)
+- `--phase-id PHASE_ID`: Optional explicit phase target for `implement` / `test` when a valid `plan/phase_plan.yaml` exists
+- `--phase-mode {single,up-to}`: Execute a single phase or the ordered prefix through `--phase-id` (default `single`)
 - `--resume`: Resume an existing task/run instead of creating a new run
 - `--run-id RUN_ID`: Optional run ID to resume; requires `--resume`
 - `--full-auto-answers`: Automatically answer `<question>` prompts through an extra Codex pass
@@ -225,34 +227,63 @@ Resume selection rules:
 - Each pair name must be from `plan`, `implement`, `test`.
 - Duplicate pair names are rejected (for example `--pairs implement,implement` fails fast).
 
+Phase targeting notes:
+
+- `plan` runs do not require phase flags.
+- If `plan/phase_plan.yaml` exists and you omit `--phase-id`, `implement` / `test` execute all explicit phases in plan order.
+- If `plan/phase_plan.yaml` does not exist, `implement` / `test` fall back to one implicit legacy phase for the full request.
+- `--phase-mode up-to` requires `--phase-id`.
+- On resume without an explicit `--phase-id`, Superloop resumes from the first incomplete phase inside the stored or newly resolved ordered selection.
+
+Examples:
+
+```bash
+python3 superloop.py --workspace . --task-id feature-x --pairs plan
+python3 superloop.py --workspace . --task-id feature-x --pairs implement,test
+python3 superloop.py --workspace . --task-id feature-x --pairs implement --phase-id phase-1
+python3 superloop.py --workspace . --task-id feature-x --pairs implement,test --phase-id phase-2 --phase-mode up-to
+```
+
 ### Superloop workspace layout
 
-`superloop.py` creates `.superloop/` under the workspace root:
+`superloop.py` stores task state under `.superloop/tasks/<task-id>/`:
 
 ```text
 .superloop/
-  context.md
-  run_log.md
-  plan/
-    prompt.md
-    verifier_prompt.md
-    criteria.md
-    feedback.md
-    plan.md                      # includes milestones, interfaces, and risk register
-  implement/
-    prompt.md
-    verifier_prompt.md
-    criteria.md
-    feedback.md
-    implementation_notes.md
-    review_findings.md
-  test/
-    prompt.md
-    verifier_prompt.md
-    criteria.md
-    feedback.md
-    test_strategy.md
-    test_gaps.md
+  tasks/
+    <task-id>/
+      task.json
+      run_log.md
+      raw_phase_log.md
+      plan/
+        prompt.md
+        verifier_prompt.md
+        criteria.md
+        feedback.md
+        plan.md
+        phase_plan.yaml          # planner-created explicit phase decomposition
+      implement/
+        prompt.md
+        verifier_prompt.md
+        criteria.md
+        feedback.md
+        implementation_notes.md
+        review_findings.md
+      test/
+        prompt.md
+        verifier_prompt.md
+        criteria.md
+        feedback.md
+        test_strategy.md
+        test_gaps.md
+      runs/
+        <run-id>/
+          request.md
+          session.json
+          run_log.md
+          raw_phase_log.md
+          events.jsonl
+          summary.md
 ```
 
 Like Doc-Loop, Superloop checkpoints progress with git commits throughout execution.
@@ -262,12 +293,13 @@ Superloop commit scope and verifier protections:
 - Superloop always persists `.superloop/` run artifacts and also commits phase output deltas, so durable code/test artifacts can live anywhere in the repository.
 - Question-path safety checks are phase-local and based on Git snapshot diffs (including newly created files), so pre-existing unrelated repo changes do not falsely trip `<question>` handling.
 - Verifier write scope is checked per pair and reported as warnings in lax-guard mode (execution continues):
-  - `plan` verifier may only edit `.superloop/plan/`
-  - `implement` verifier may only edit `.superloop/implement/`
-  - `test` verifier may only edit `.superloop/test/`
+  - `plan` verifier may only edit `.superloop/tasks/<task-id>/plan/`
+  - `implement` verifier may only edit `.superloop/tasks/<task-id>/implement/`
+  - `test` verifier may only edit `.superloop/tasks/<task-id>/test/`
 - Multiple canonical `<loop-control>` blocks, malformed canonical payloads, and canonical output mixed with legacy semantic control tags are treated as fatal protocol violations.
 - If a verifier emits `COMPLETE` while criteria checkboxes remain unchecked, Superloop warns and downgrades that pass to `INCOMPLETE`.
 - If a verifier omits any promise output, Superloop appends `No promise tag found, defaulted to <promise>INCOMPLETE</promise>.` to pair feedback and defaults that pass to `INCOMPLETE`.
+- Phase-scoped runs persist lifecycle state in `task.json` and record `phase_scope_resolved`, `phase_started`, `phase_completed`, `phase_blocked`, and `phase_deferred` events in the run event stream.
 
 ## Reflow
 
