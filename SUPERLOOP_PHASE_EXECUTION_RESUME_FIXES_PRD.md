@@ -49,8 +49,8 @@ The current phased execution path has four user-visible issues:
 ### Resume behavior
 
 - Resume without an explicit `--phase-id` must start at the first incomplete phase in the stored or newly resolved ordered selection.
-- Durable `task.json` phase state is the source of truth for whether a phase or phase/pair is complete.
-- `events.jsonl` is used to reconstruct cycle/attempt counters and prior lifecycle emissions, not to override durable completion state.
+- Durable run `events.jsonl` state is the source of truth for phase/pair completion within a run.
+- `task.json` continues to persist phase lifecycle selection/status metadata, while completion of `(phase_id, pair)` is reconstructed from run events.
 - Pair completion must be reconstructed per `(phase_id, pair)` when phase IDs are present in the event stream.
 
 ### Lifecycle behavior
@@ -64,7 +64,7 @@ The current phased execution path has four user-visible issues:
 
 - Keep `selection.phase_ids` as the authoritative ordered selection.
 - Do not add a new persisted `phase_mode`; the resolved phase list defines what will run.
-- Compute resume landing from durable phase pair completion in `task.json`.
+- Compute resume landing from run-scoped `(phase_id, pair)` completion reconstructed from `events.jsonl`.
 - Continue to run `implement` before `test` inside each phase and only advance after the enabled pair set for that phase is satisfied.
 
 ## Files expected to change

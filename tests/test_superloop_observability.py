@@ -144,6 +144,20 @@ def test_event_recorder_and_summary_counts(tmp_path: Path):
     assert "phase_completed events: 1" in summary
 
 
+def test_write_run_summary_allows_phase_lifecycle_events_after_pair_completed(tmp_path: Path):
+    run_paths = create_run_paths(tmp_path, "run-lifecycle", "Implement feature X")
+    recorder = EventRecorder(run_id="run-lifecycle", events_file=run_paths["events_file"])
+    recorder.emit("pair_completed", pair="implement", cycle=1, attempt=1, phase_id="phase-1")
+    recorder.emit("phase_deferred", pair="implement", phase_id="phase-1")
+    recorder.emit("pair_completed", pair="test", cycle=1, attempt=1, phase_id="phase-1")
+    recorder.emit("phase_completed", pair="test", phase_id="phase-1")
+    recorder.emit("run_finished", status="success")
+
+    write_run_summary(run_paths["summary_file"], "run-lifecycle", run_paths["events_file"])
+    summary = run_paths["summary_file"].read_text(encoding="utf-8")
+    assert "## Invariant violations" not in summary
+
+
 def test_load_resume_checkpoint_skips_completed_pairs_and_continues_cycle(tmp_path: Path):
     run_paths = create_run_paths(tmp_path, "run-abc", "Implement feature X")
     recorder = EventRecorder(run_id="run-abc", events_file=run_paths["events_file"])
@@ -157,6 +171,48 @@ def test_load_resume_checkpoint_skips_completed_pairs_and_continues_cycle(tmp_pa
     assert checkpoint.attempts_by_pair_cycle[("implement", 2)] == 3
     assert checkpoint.phase_mode == "single"
     assert checkpoint.phase_ids == ("phase-1",)
+
+
+def test_validate_phase_plan_rejects_duplicate_phase_ids_after_normalization():
+    import pytest
+
+    with pytest.raises(superloop.PhasePlanError):
+        superloop.validate_phase_plan(
+            {
+                "version": 1,
+                "task_id": "dup-phase-task",
+                "request_snapshot_ref": "request.md",
+                "phases": [
+                    {
+                        "phase_id": "phase-1",
+                        "title": "Phase 1",
+                        "objective": "First",
+                        "in_scope": ["first"],
+                        "out_of_scope": [],
+                        "dependencies": [],
+                        "acceptance_criteria": [{"id": "AC-1", "text": "first done"}],
+                        "deliverables": ["code"],
+                        "risks": [],
+                        "rollback": [],
+                        "status": "planned",
+                    },
+                    {
+                        "phase_id": " phase-1 ",
+                        "title": "Phase 1 duplicate",
+                        "objective": "Duplicate",
+                        "in_scope": ["dup"],
+                        "out_of_scope": [],
+                        "dependencies": [],
+                        "acceptance_criteria": [{"id": "AC-2", "text": "dup done"}],
+                        "deliverables": ["docs"],
+                        "risks": [],
+                        "rollback": [],
+                        "status": "planned",
+                    },
+                ],
+            },
+            "dup-phase-task",
+        )
 
 
 def test_append_run_log_scopes_entries(tmp_path: Path):
@@ -869,8 +925,7 @@ def test_main_without_phase_id_with_explicit_phase_plan_executes_all_phases_in_o
     assert task_meta["active_phase_selection"]["phase_ids"] == ["phase-1", "phase-2"]
     assert task_meta["phase_status"]["phase-1"] == "completed"
     assert task_meta["phase_status"]["phase-2"] == "completed"
-    assert task_meta["phase_pair_status"]["phase-1"]["implement"] == "completed"
-    assert task_meta["phase_pair_status"]["phase-2"]["implement"] == "completed"
+    assert "phase_pair_status" not in task_meta
 
 
 def test_main_fails_fast_when_yaml_missing_for_plan_plus_phased_pairs(tmp_path: Path, monkeypatch):
@@ -1003,7 +1058,7 @@ def test_main_implement_with_explicit_phase_id_emits_phase_events_and_updates_me
     task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
     assert task_meta["phase_status"]["phase-1"] == "completed"
     assert task_meta["active_phase_selection"]["phase_ids"] == ["phase-1"]
-    assert task_meta["phase_pair_status"]["phase-1"]["implement"] == "completed"
+    assert "phase_pair_status" not in task_meta
 
 
 def test_main_up_to_executes_phases_sequentially_and_completes_each_phase(tmp_path: Path, monkeypatch):
@@ -1090,10 +1145,7 @@ def test_main_up_to_executes_phases_sequentially_and_completes_each_phase(tmp_pa
     task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
     assert task_meta["phase_status"]["phase-1"] == "completed"
     assert task_meta["phase_status"]["phase-2"] == "completed"
-    assert task_meta["phase_pair_status"]["phase-1"]["implement"] == "completed"
-    assert task_meta["phase_pair_status"]["phase-1"]["test"] == "completed"
-    assert task_meta["phase_pair_status"]["phase-2"]["implement"] == "completed"
-    assert task_meta["phase_pair_status"]["phase-2"]["test"] == "completed"
+    assert "phase_pair_status" not in task_meta
 
 
 def test_load_resume_checkpoint_tracks_phase_scoped_completion_and_cycles(tmp_path: Path):
@@ -1202,11 +1254,6 @@ def test_main_resume_without_phase_id_resumes_first_incomplete_phase_and_dedupes
         "phase-2": "in_progress",
         "phase-3": "planned",
     }
-    task_meta["phase_pair_status"] = {
-        "phase-1": {"implement": "completed", "test": "completed"},
-        "phase-2": {"implement": "completed"},
-        "phase-3": {},
-    }
     paths["task_meta_file"].write_text(json.dumps(task_meta, indent=2) + "\n", encoding="utf-8")
 
     control = superloop.LoopControl(
@@ -1284,11 +1331,119 @@ def test_main_resume_without_phase_id_resumes_first_incomplete_phase_and_dedupes
     updated_task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
     assert updated_task_meta["phase_status"]["phase-2"] == "completed"
     assert updated_task_meta["phase_status"]["phase-3"] == "completed"
-    assert updated_task_meta["phase_pair_status"]["phase-2"]["implement"] == "completed"
-    assert updated_task_meta["phase_pair_status"]["phase-2"]["test"] == "completed"
-    assert updated_task_meta["phase_pair_status"]["phase-3"]["implement"] == "completed"
-    assert updated_task_meta["phase_pair_status"]["phase-3"]["test"] == "completed"
+    assert "phase_pair_status" not in updated_task_meta
 
+
+def test_main_resume_skips_plan_pair_when_plan_already_completed(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="resume-plan-skip-task",
+        product_intent="Resume plan skip request",
+        intent_mode="replace",
+    )
+    write_phase_plan(phase_plan_file(paths["task_dir"]), "resume-plan-skip-task")
+
+    run_paths = create_run_paths(paths["runs_dir"], "run-20260319T020202Z-bbbbbbbb", "Resume request")
+    recorder = EventRecorder(run_id="run-20260319T020202Z-bbbbbbbb", events_file=run_paths["events_file"])
+    recorder.emit("run_started", workspace=str(tmp_path), pairs=["plan", "implement"])
+    recorder.emit("pair_completed", pair="plan", cycle=1, attempt=1)
+    recorder.emit("phase_scope_resolved", phase_mode="single", phase_ids=["phase-1"], current_phase_index=0)
+    recorder.emit("phase_started", pair="implement", phase_id="phase-1")
+
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(
+        superloop,
+        "run_codex_phase",
+        lambda *args, **kwargs: calls.append(args[4]) or "<loop-control></loop-control>",
+    )
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan,implement",
+            "--task-id",
+            "resume-plan-skip-task",
+            "--resume",
+            "--run-id",
+            "run-20260319T020202Z-bbbbbbbb",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    assert calls == ["implement", "implement"]
+
+
+def test_main_non_resume_does_not_skip_prior_run_phase_pair_completion(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="non-resume-phase-task",
+        product_intent="Prior run should not skip new run",
+        intent_mode="replace",
+    )
+    write_phase_plan(phase_plan_file(paths["task_dir"]), "non-resume-phase-task")
+
+    prior_run = create_run_paths(paths["runs_dir"], "run-20260319T020303Z-cccccccc", "Prior run")
+    prior_recorder = EventRecorder(run_id="run-20260319T020303Z-cccccccc", events_file=prior_run["events_file"])
+    prior_recorder.emit("pair_completed", pair="implement", cycle=1, attempt=1, phase_id="phase-1")
+    prior_recorder.emit("run_finished", status="success")
+
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(
+        superloop,
+        "run_codex_phase",
+        lambda *args, **kwargs: calls.append((args[4], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
+    )
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "implement",
+            "--task-id",
+            "non-resume-phase-task",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    assert calls == [("implement", "phase-1"), ("implement", "phase-1")]
 
 def test_main_test_only_requires_prior_implement_completion(tmp_path: Path, monkeypatch):
     install_fake_yaml(monkeypatch)
@@ -1335,7 +1490,7 @@ def test_main_test_only_requires_prior_implement_completion(tmp_path: Path, monk
 
     task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
     assert task_meta["phase_status"]["phase-1"] != "completed"
-    assert task_meta["phase_pair_status"]["phase-1"] == {}
+    assert "phase_pair_status" not in task_meta
 
 
 def test_main_implement_without_phase_plan_uses_implicit_phase(tmp_path: Path, monkeypatch):

@@ -590,8 +590,9 @@ def validate_phase_plan(payload: object, task_id: str) -> PhasePlan:
         status = raw_phase.get("status")
         if not isinstance(phase_id, str) or not phase_id.strip():
             raise PhasePlanError(f"{label}.phase_id must be a non-empty string.")
-        if phase_id in phase_ids:
-            raise PhasePlanError(f"phase_plan.yaml contains duplicate phase_id {phase_id!r}.")
+        normalized_phase_id = phase_id.strip()
+        if normalized_phase_id in phase_ids:
+            raise PhasePlanError(f"phase_plan.yaml contains duplicate phase_id {normalized_phase_id!r}.")
         if not isinstance(title, str) or not title.strip():
             raise PhasePlanError(f"{label}.title must be a non-empty string.")
         if not isinstance(objective, str) or not objective.strip():
@@ -600,10 +601,10 @@ def validate_phase_plan(payload: object, task_id: str) -> PhasePlan:
             raise PhasePlanError(
                 f"{label}.status must be one of: {', '.join(sorted(RUNTIME_PHASE_STATUSES))}."
             )
-        phase_ids.append(phase_id)
+        phase_ids.append(normalized_phase_id)
         built_phases.append(
             PhasePlanPhase(
-                phase_id=phase_id.strip(),
+                phase_id=normalized_phase_id,
                 title=title.strip(),
                 objective=objective.strip(),
                 in_scope=_phase_string_list(raw_phase.get("in_scope"), f"{label}.in_scope", allow_empty=False),
@@ -819,17 +820,11 @@ def persist_phase_selection(
     }
     raw_phase_status = payload.get("phase_status")
     phase_status = raw_phase_status if isinstance(raw_phase_status, dict) else {}
-    raw_phase_pair_status = payload.get("phase_pair_status")
-    phase_pair_status = raw_phase_pair_status if isinstance(raw_phase_pair_status, dict) else {}
     for phase_id in selection.phase_ids:
         current = phase_status.get(phase_id)
         if current not in RUNTIME_PHASE_STATUSES:
             phase_status[phase_id] = PHASE_STATUS_PLANNED
-        pair_state = phase_pair_status.get(phase_id)
-        if not isinstance(pair_state, dict):
-            phase_pair_status[phase_id] = {}
     payload["phase_status"] = phase_status
-    payload["phase_pair_status"] = phase_pair_status
     _write_task_meta(task_meta_file, payload)
 
 
@@ -845,20 +840,15 @@ def active_phase_index_from_meta(task_meta_file: Path) -> int:
 
 
 def resolve_resume_start_phase_index(
-    task_meta_file: Path,
     selection: ResolvedPhaseSelection,
     phased_enabled: Sequence[str],
+    completed_pairs_by_phase: Dict[str, Tuple[str, ...]],
 ) -> int:
     if not selection.phase_ids:
         return 0
-    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
-    raw_phase_pair_status = payload.get("phase_pair_status")
-    phase_pair_status = raw_phase_pair_status if isinstance(raw_phase_pair_status, dict) else {}
     for idx, phase_id in enumerate(selection.phase_ids):
-        pair_state = phase_pair_status.get(phase_id)
-        if not isinstance(pair_state, dict):
-            return idx
-        if any(pair_state.get(pair) != "completed" for pair in phased_enabled):
+        completed_for_phase = set(completed_pairs_by_phase.get(phase_id, ()))
+        if any(pair not in completed_for_phase for pair in phased_enabled):
             return idx
     return len(selection.phase_ids)
 
@@ -883,45 +873,12 @@ def update_active_phase_index(task_meta_file: Path, phase_index: int, current_ph
     _write_task_meta(task_meta_file, payload)
 
 
-def phase_pair_completed(task_meta_file: Path, phase_id: str, pair: str) -> bool:
-    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
-    raw_phase_pair_status = payload.get("phase_pair_status")
-    if not isinstance(raw_phase_pair_status, dict):
-        return False
-    pair_state = raw_phase_pair_status.get(phase_id)
-    if not isinstance(pair_state, dict):
-        return False
-    return pair_state.get(pair) == "completed"
+def phase_pair_completed(completed_phase_pairs: Dict[str, Set[str]], phase_id: str, pair: str) -> bool:
+    return pair in completed_phase_pairs.get(phase_id, set())
 
 
-def mark_phase_pair_completed(task_meta_file: Path, phase_id: str, pair: str, *, run_id: str):
-    payload = _load_task_meta(task_meta_file, task_meta_file.parent.name)
-    raw_phase_pair_status = payload.get("phase_pair_status")
-    phase_pair_status = raw_phase_pair_status if isinstance(raw_phase_pair_status, dict) else {}
-    pair_state = phase_pair_status.get(phase_id)
-    if not isinstance(pair_state, dict):
-        pair_state = {}
-    if pair_state.get(pair) == "completed":
-        phase_pair_status[phase_id] = pair_state
-        payload["phase_pair_status"] = phase_pair_status
-        _write_task_meta(task_meta_file, payload)
-        return
-    pair_state[pair] = "completed"
-    phase_pair_status[phase_id] = pair_state
-    payload["phase_pair_status"] = phase_pair_status
-    raw_history = payload.get("phase_history")
-    history = list(raw_history) if isinstance(raw_history, list) else []
-    history.append(
-        {
-            "phase_id": phase_id,
-            "run_id": run_id,
-            "pair": pair,
-            "status": "pair_completed",
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    payload["phase_history"] = history
-    _write_task_meta(task_meta_file, payload)
+def mark_phase_pair_completed(completed_phase_pairs: Dict[str, Set[str]], phase_id: str, pair: str):
+    completed_phase_pairs.setdefault(phase_id, set()).add(pair)
 
 
 def mark_phase_status(
@@ -1923,7 +1880,18 @@ def write_run_summary(summary_file: Path, run_id: str, events_file: Path):
             pair = event.get("pair")
             phase_id = event.get("phase_id") if isinstance(event.get("phase_id"), str) else None
             completion_scope = (pair, phase_id) if pair else None
-            if completion_scope and completion_scope in completed_pair_scopes and event_type not in {"pair_completed", "run_finished"}:
+            allowed_after_pair_completion = {
+                "pair_completed",
+                "run_finished",
+                "phase_deferred",
+                "phase_completed",
+                "phase_blocked",
+            }
+            if (
+                completion_scope
+                and completion_scope in completed_pair_scopes
+                and event_type not in allowed_after_pair_completion
+            ):
                 invariant_violations.append(
                     f"Pair {pair} received event {event_type} after pair_completed for phase "
                     f"{phase_id or '[global]'} (seq={event.get('seq')})."
@@ -2704,6 +2672,11 @@ def main() -> int:
     try:
         active_phase_selection: Optional[ResolvedPhaseSelection] = None
         phase_scope_emitted = False
+        completed_phase_pairs: Dict[str, Set[str]] = (
+            {phase_id: set(pairs) for phase_id, pairs in resume_checkpoint.completed_pairs_by_phase.items()}
+            if resume_checkpoint is not None
+            else {}
+        )
         phase_started_ids: Set[str] = set(
             resume_checkpoint.emitted_phase_started_ids if resume_checkpoint is not None else ()
         )
@@ -2716,7 +2689,14 @@ def main() -> int:
         pair_by_name = {cfg.name: cfg for cfg in pair_configs}
 
         plan_cfg = pair_by_name.get("plan")
-        if plan_cfg is not None and plan_cfg.enabled:
+        should_run_plan_pair = plan_cfg is not None and plan_cfg.enabled
+        if should_run_plan_pair and args.resume and resume_checkpoint is not None:
+            try:
+                plan_pair_index = enabled_pairs.index("plan")
+            except ValueError:
+                plan_pair_index = -1
+            should_run_plan_pair = plan_pair_index >= 0 and plan_pair_index >= resume_checkpoint.pair_start_index
+        if should_run_plan_pair:
             plan_result, plan_exit = execute_pair_cycles(
                 pair_cfg=plan_cfg,
                 pair="plan",
@@ -2762,9 +2742,9 @@ def main() -> int:
             )
             if args.resume:
                 starting_phase_index = resolve_resume_start_phase_index(
-                    paths["task_meta_file"],
                     active_phase_selection,
                     phased_enabled,
+                    resume_checkpoint.completed_pairs_by_phase if resume_checkpoint is not None else {},
                 )
             else:
                 starting_phase_index = 0
@@ -2825,9 +2805,9 @@ def main() -> int:
                 for pair in phased_enabled:
                     pair_cfg = pair_by_name[pair]
                     assert pair_cfg is not None
-                    if phase_pair_completed(paths["task_meta_file"], current_phase.phase_id, pair):
+                    if args.resume and phase_pair_completed(completed_phase_pairs, current_phase.phase_id, pair):
                         continue
-                    if pair == "test" and not phase_pair_completed(paths["task_meta_file"], current_phase.phase_id, "implement"):
+                    if pair == "test" and not phase_pair_completed(completed_phase_pairs, current_phase.phase_id, "implement"):
                         fatal(
                             f"[!] FATAL: Cannot run test completion for phase {current_phase.phase_id!r} "
                             "before implement completion has been recorded for that phase."
@@ -2877,12 +2857,7 @@ def main() -> int:
                         exit_code = result_exit
                         return exit_code
 
-                    mark_phase_pair_completed(
-                        paths["task_meta_file"],
-                        current_phase.phase_id,
-                        pair,
-                        run_id=run_id,
-                    )
+                    mark_phase_pair_completed(completed_phase_pairs, current_phase.phase_id, pair)
                     if pair == "implement" and "test" in phased_enabled:
                         deferred_key = (current_phase.phase_id, pair)
                         if deferred_key not in phase_deferred_keys:
