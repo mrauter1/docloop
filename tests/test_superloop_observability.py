@@ -11,15 +11,21 @@ from superloop import (
     append_clarification,
     append_raw_phase_log,
     append_run_log,
+    build_phase_prompt,
     create_run_paths,
     derive_intent_task_id,
     ensure_workspace,
     latest_run_id,
     latest_task_id,
     load_resume_checkpoint,
+    load_phase_plan,
     open_existing_run_paths,
     latest_run_status,
+    phase_plan_file,
     resolve_task_id,
+    resolve_phase_selection,
+    restore_phase_selection,
+    SessionState,
     task_request_text,
     task_id_for_run,
     write_run_summary,
@@ -31,6 +37,42 @@ def fake_codex_command() -> CodexCommandConfig:
         start_command=["codex", "exec", "--json", "-"],
         resume_command=["codex", "exec", "resume", "--json"],
     )
+
+
+def install_fake_yaml(monkeypatch):
+    class FakeYaml:
+        YAMLError = ValueError
+
+        @staticmethod
+        def safe_load(text: str):
+            return json.loads(text)
+
+    monkeypatch.setattr(superloop, "yaml", FakeYaml)
+
+
+def write_phase_plan(path: Path, task_id: str, *, phases: list[dict[str, object]] | None = None):
+    payload = {
+        "version": 1,
+        "task_id": task_id,
+        "request_snapshot_ref": "request.md",
+        "phases": phases
+        or [
+            {
+                "phase_id": "phase-1",
+                "title": "Phase 1",
+                "objective": "Build phase one",
+                "in_scope": ["Implement phase one"],
+                "out_of_scope": [],
+                "dependencies": [],
+                "acceptance_criteria": [{"id": "AC-1", "text": "Phase one is complete"}],
+                "deliverables": ["code"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def test_create_run_paths_creates_per_run_artifacts(tmp_path: Path):
@@ -84,22 +126,28 @@ def test_event_recorder_and_summary_counts(tmp_path: Path):
     recorder.emit("pair_started", pair="plan")
     recorder.emit("phase_output_empty", pair="plan", phase="producer", cycle=1, attempt=1)
     recorder.emit("missing_promise_default", pair="plan", cycle=1, attempt=1)
+    recorder.emit("phase_scope_resolved", phase_mode="single", phase_ids=["phase-1"])
+    recorder.emit("phase_started", pair="implement", phase_id="phase-1")
+    recorder.emit("phase_completed", pair="implement", phase_id="phase-1")
     recorder.emit("pair_completed", pair="plan", cycle=1, attempt=1)
     recorder.emit("run_finished", status="success")
 
     events = [json.loads(line) for line in run_paths["events_file"].read_text(encoding="utf-8").splitlines() if line]
-    assert [e["seq"] for e in events] == [1, 2, 3, 4, 5]
+    assert [e["seq"] for e in events] == [1, 2, 3, 4, 5, 6, 7, 8]
 
     write_run_summary(run_paths["summary_file"], "run-abc", run_paths["events_file"])
     summary = run_paths["summary_file"].read_text(encoding="utf-8")
     assert "phase_output_empty: 1" in summary
     assert "missing_promise_default: 1" in summary
     assert "pair_completed events: 1" in summary
+    assert "phase_scope_resolved events: 1" in summary
+    assert "phase_completed events: 1" in summary
 
 
 def test_load_resume_checkpoint_skips_completed_pairs_and_continues_cycle(tmp_path: Path):
     run_paths = create_run_paths(tmp_path, "run-abc", "Implement feature X")
     recorder = EventRecorder(run_id="run-abc", events_file=run_paths["events_file"])
+    recorder.emit("phase_scope_resolved", phase_mode="single", phase_ids=["phase-1"])
     recorder.emit("pair_completed", pair="plan", cycle=1, attempt=1)
     recorder.emit("phase_finished", pair="implement", phase="producer", cycle=2, attempt=3)
 
@@ -107,6 +155,8 @@ def test_load_resume_checkpoint_skips_completed_pairs_and_continues_cycle(tmp_pa
     assert checkpoint.pair_start_index == 1
     assert checkpoint.cycle_by_pair["implement"] == 1
     assert checkpoint.attempts_by_pair_cycle[("implement", 2)] == 3
+    assert checkpoint.phase_mode == "single"
+    assert checkpoint.phase_ids == ("phase-1",)
 
 
 def test_append_run_log_scopes_entries(tmp_path: Path):
@@ -376,13 +426,118 @@ def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: P
     assert paths["task_dir"] == task_dir
     assert (task_dir / "task.json").exists()
     assert (task_dir / "plan" / "prompt.md").exists()
+    assert not phase_plan_file(task_dir).exists()
     assert not (task_dir / "context.md").exists()
     assert task_request_text(paths["task_meta_file"], paths["legacy_context_file"]) == "Implement feature X"
 
     plan_prompt = (task_dir / "plan" / "prompt.md").read_text(encoding="utf-8")
     assert ".superloop/tasks/my-task/plan/plan.md" in plan_prompt
+    assert ".superloop/tasks/my-task/plan/phase_plan.yaml" in plan_prompt
     assert ".superloop/plan/plan.md" not in plan_prompt
     assert ".superloop/context.md" not in plan_prompt
+
+
+def test_load_phase_plan_and_resolve_selection(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    task_dir = tmp_path / ".superloop" / "tasks" / "demo-task"
+    (task_dir / "plan").mkdir(parents=True)
+    write_phase_plan(
+        phase_plan_file(task_dir),
+        "demo-task",
+        phases=[
+            {
+                "phase_id": "phase-1",
+                "title": "Phase 1",
+                "objective": "Do first",
+                "in_scope": ["first"],
+                "out_of_scope": [],
+                "dependencies": [],
+                "acceptance_criteria": [{"id": "AC-1", "text": "first done"}],
+                "deliverables": ["code"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+            {
+                "phase_id": "phase-2",
+                "title": "Phase 2",
+                "objective": "Do second",
+                "in_scope": ["second"],
+                "out_of_scope": [],
+                "dependencies": ["phase-1"],
+                "acceptance_criteria": [{"id": "AC-2", "text": "second done"}],
+                "deliverables": ["tests"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+        ],
+    )
+
+    plan = load_phase_plan(phase_plan_file(task_dir), "demo-task")
+    assert plan is not None
+
+    default_selection = resolve_phase_selection(plan, None, "single", ["implement", "test"])
+    assert default_selection.phase_mode == "single"
+    assert default_selection.phase_ids == ("phase-1", "phase-2")
+
+    selection = resolve_phase_selection(plan, "phase-2", "up-to", ["implement", "test"])
+    assert selection.phase_mode == "up-to"
+    assert selection.phase_ids == ("phase-1", "phase-2")
+
+    restored = restore_phase_selection(plan, ("phase-1", "phase-2"), "up-to")
+    assert restored.phase_ids == ("phase-1", "phase-2")
+
+
+def test_build_phase_prompt_includes_active_phase_contract(tmp_path: Path):
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("Prompt body\n", encoding="utf-8")
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=("future work",),
+                dependencies=("phase-0",),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+
+    prompt = build_phase_prompt(
+        cwd=tmp_path,
+        prompt_file=prompt_file,
+        request_file=request_file,
+        run_raw_phase_log=tmp_path / "raw_phase_log.md",
+        pair_name="implement",
+        phase_name="producer",
+        cycle_num=1,
+        attempt_num=1,
+        run_id="run-1",
+        session_state=SessionState(
+            mode="persistent",
+            thread_id=None,
+            pending_clarification_note=None,
+            created_at="2026-03-18T00:00:00Z",
+        ),
+        include_request_snapshot=True,
+        active_phase_selection=selection,
+    )
+
+    assert "ACTIVE PHASE EXECUTION CONTRACT:" in prompt
+    assert "phase_ids: phase-1" in prompt
+    assert "Phase phase-1: Phase 1" in prompt
 
 
 def test_ensure_workspace_preserve_mode_keeps_existing_request(tmp_path: Path):
@@ -624,3 +779,603 @@ def test_main_resume_reconstructs_missing_request_from_legacy_context_not_curren
     assert "Newer mutable task request" not in request_text
     assert "entry=request_recovery" in raw_log_text
     assert "reconstructed from the legacy task context" in run_log_text
+
+
+def test_main_without_phase_id_with_explicit_phase_plan_executes_all_phases_in_order(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="phase-task",
+        product_intent="Explicit plan request",
+        intent_mode="replace",
+    )
+    write_phase_plan(
+        phase_plan_file(paths["task_dir"]),
+        "phase-task",
+        phases=[
+            {
+                "phase_id": "phase-1",
+                "title": "Phase 1",
+                "objective": "First",
+                "in_scope": ["first"],
+                "out_of_scope": [],
+                "dependencies": [],
+                "acceptance_criteria": [{"id": "AC-1", "text": "first done"}],
+                "deliverables": ["code"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+            {
+                "phase_id": "phase-2",
+                "title": "Phase 2",
+                "objective": "Second",
+                "in_scope": ["second"],
+                "out_of_scope": [],
+                "dependencies": ["phase-1"],
+                "acceptance_criteria": [{"id": "AC-2", "text": "second done"}],
+                "deliverables": ["docs"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+        ],
+    )
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(
+        superloop,
+        "run_codex_phase",
+        lambda *args, **kwargs: calls.append((args[4], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
+    )
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "implement",
+            "--task-id",
+            "phase-task",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    assert calls == [
+        ("implement", "phase-1"),
+        ("implement", "phase-1"),
+        ("implement", "phase-2"),
+        ("implement", "phase-2"),
+    ]
+
+    task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    assert task_meta["active_phase_selection"]["phase_ids"] == ["phase-1", "phase-2"]
+    assert task_meta["phase_status"]["phase-1"] == "completed"
+    assert task_meta["phase_status"]["phase-2"] == "completed"
+    assert task_meta["phase_pair_status"]["phase-1"]["implement"] == "completed"
+    assert task_meta["phase_pair_status"]["phase-2"]["implement"] == "completed"
+
+
+def test_main_fails_fast_when_yaml_missing_for_plan_plus_phased_pairs(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="yaml-fast-fail",
+        product_intent="Need phased execution",
+        intent_mode="replace",
+    )
+
+    monkeypatch.setattr(superloop, "yaml", None)
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan,implement,test",
+            "--task-id",
+            "yaml-fast-fail",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    import pytest
+    with pytest.raises(SystemExit):
+        superloop.main()
+
+    assert phase_plan_file(paths["task_dir"]).exists() is False
+
+
+def test_main_allows_implicit_legacy_phase_when_yaml_missing_and_no_explicit_plan(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="yaml-implicit-ok",
+        product_intent="Legacy implicit flow",
+        intent_mode="replace",
+    )
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "yaml", None)
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "implement",
+            "--task-id",
+            "yaml-implicit-ok",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    assert phase_plan_file(paths["task_dir"]).exists() is False
+
+
+def test_main_implement_with_explicit_phase_id_emits_phase_events_and_updates_meta(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="phase-task",
+        product_intent="Explicit plan request",
+        intent_mode="replace",
+    )
+    write_phase_plan(phase_plan_file(paths["task_dir"]), "phase-task")
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "implement",
+            "--task-id",
+            "phase-task",
+            "--phase-id",
+            "phase-1",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+
+    events_file = next((paths["runs_dir"]).iterdir()) / "events.jsonl"
+    event_types = [json.loads(line)["event_type"] for line in events_file.read_text(encoding="utf-8").splitlines() if line]
+    assert "phase_scope_resolved" in event_types
+    assert "phase_started" in event_types
+    assert "phase_completed" in event_types
+
+    task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    assert task_meta["phase_status"]["phase-1"] == "completed"
+    assert task_meta["active_phase_selection"]["phase_ids"] == ["phase-1"]
+    assert task_meta["phase_pair_status"]["phase-1"]["implement"] == "completed"
+
+
+def test_main_up_to_executes_phases_sequentially_and_completes_each_phase(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="phase-prefix-task",
+        product_intent="Explicit prefix request",
+        intent_mode="replace",
+    )
+    write_phase_plan(
+        phase_plan_file(paths["task_dir"]),
+        "phase-prefix-task",
+        phases=[
+            {
+                "phase_id": "phase-1",
+                "title": "Phase 1",
+                "objective": "First",
+                "in_scope": ["first"],
+                "out_of_scope": [],
+                "dependencies": [],
+                "acceptance_criteria": [{"id": "AC-1", "text": "first done"}],
+                "deliverables": ["code"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+            {
+                "phase_id": "phase-2",
+                "title": "Phase 2",
+                "objective": "Second",
+                "in_scope": ["second"],
+                "out_of_scope": [],
+                "dependencies": ["phase-1"],
+                "acceptance_criteria": [{"id": "AC-2", "text": "second done"}],
+                "deliverables": ["tests"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+        ],
+    )
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "implement,test",
+            "--task-id",
+            "phase-prefix-task",
+            "--phase-id",
+            "phase-2",
+            "--phase-mode",
+            "up-to",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+
+    events_file = next((paths["runs_dir"]).iterdir()) / "events.jsonl"
+    events = [json.loads(line) for line in events_file.read_text(encoding="utf-8").splitlines() if line]
+    completed_phase_ids = [event["phase_id"] for event in events if event["event_type"] == "phase_completed"]
+    assert completed_phase_ids == ["phase-1", "phase-2"]
+
+    task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    assert task_meta["phase_status"]["phase-1"] == "completed"
+    assert task_meta["phase_status"]["phase-2"] == "completed"
+    assert task_meta["phase_pair_status"]["phase-1"]["implement"] == "completed"
+    assert task_meta["phase_pair_status"]["phase-1"]["test"] == "completed"
+    assert task_meta["phase_pair_status"]["phase-2"]["implement"] == "completed"
+    assert task_meta["phase_pair_status"]["phase-2"]["test"] == "completed"
+
+
+def test_load_resume_checkpoint_tracks_phase_scoped_completion_and_cycles(tmp_path: Path):
+    run_paths = create_run_paths(tmp_path, "run-phase-aware", "Implement feature X")
+    recorder = EventRecorder(run_id="run-phase-aware", events_file=run_paths["events_file"])
+
+    recorder.emit("phase_scope_resolved", phase_mode="single", phase_ids=["phase-1", "phase-2"], current_phase_index=1)
+    recorder.emit("pair_completed", pair="implement", cycle=1, attempt=1, phase_id="phase-1")
+    recorder.emit("phase_started", pair="implement", phase_id="phase-2")
+    recorder.emit("phase_finished", pair="implement", phase="producer", cycle=2, attempt=3, phase_id="phase-2")
+    recorder.emit("phase_deferred", pair="implement", phase_id="phase-2")
+
+    checkpoint = load_resume_checkpoint(run_paths["events_file"], ["implement", "test"])
+    assert checkpoint.phase_ids == ("phase-1", "phase-2")
+    assert checkpoint.current_phase_index == 1
+    assert checkpoint.completed_pairs_by_phase == {"phase-1": ("implement",)}
+    assert checkpoint.cycle_by_phase_pair[("phase-2", "implement")] == 1
+    assert checkpoint.attempts_by_phase_pair_cycle[("phase-2", "implement", 2)] == 3
+    assert checkpoint.scope_event_seen is True
+    assert checkpoint.emitted_phase_started_ids == ("phase-2",)
+    assert checkpoint.emitted_phase_deferred_keys == (("phase-2", "implement"),)
+
+
+def test_main_resume_without_phase_id_resumes_first_incomplete_phase_and_dedupes_events(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="resume-phase-task",
+        product_intent="Explicit resume request",
+        intent_mode="replace",
+    )
+    write_phase_plan(
+        phase_plan_file(paths["task_dir"]),
+        "resume-phase-task",
+        phases=[
+            {
+                "phase_id": "phase-1",
+                "title": "Phase 1",
+                "objective": "First",
+                "in_scope": ["first"],
+                "out_of_scope": [],
+                "dependencies": [],
+                "acceptance_criteria": [{"id": "AC-1", "text": "first done"}],
+                "deliverables": ["code"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+            {
+                "phase_id": "phase-2",
+                "title": "Phase 2",
+                "objective": "Second",
+                "in_scope": ["second"],
+                "out_of_scope": [],
+                "dependencies": ["phase-1"],
+                "acceptance_criteria": [{"id": "AC-2", "text": "second done"}],
+                "deliverables": ["tests"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+            {
+                "phase_id": "phase-3",
+                "title": "Phase 3",
+                "objective": "Third",
+                "in_scope": ["third"],
+                "out_of_scope": [],
+                "dependencies": ["phase-2"],
+                "acceptance_criteria": [{"id": "AC-3", "text": "third done"}],
+                "deliverables": ["docs"],
+                "risks": [],
+                "rollback": [],
+                "status": "planned",
+            },
+        ],
+    )
+    run_paths = create_run_paths(paths["runs_dir"], "run-20260319T010101Z-aaaaaaaa", "Explicit resume request")
+    recorder = EventRecorder(run_id="run-20260319T010101Z-aaaaaaaa", events_file=run_paths["events_file"])
+    recorder.emit("run_started", workspace=str(tmp_path), pairs=["implement", "test"])
+    recorder.emit(
+        "phase_scope_resolved",
+        phase_mode="single",
+        phase_ids=["phase-1", "phase-2", "phase-3"],
+        current_phase_index=1,
+    )
+    recorder.emit("phase_started", pair="implement", phase_id="phase-1")
+    recorder.emit("pair_completed", pair="implement", cycle=1, attempt=1, phase_id="phase-1")
+    recorder.emit("phase_deferred", pair="implement", phase_id="phase-1")
+    recorder.emit("pair_completed", pair="test", cycle=1, attempt=1, phase_id="phase-1")
+    recorder.emit("phase_completed", pair="test", phase_id="phase-1")
+    recorder.emit("phase_started", pair="implement", phase_id="phase-2")
+    recorder.emit("pair_completed", pair="implement", cycle=1, attempt=1, phase_id="phase-2")
+    recorder.emit("phase_deferred", pair="implement", phase_id="phase-2")
+
+    task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    task_meta["active_phase_selection"] = {
+        "run_id": "run-20260319T010101Z-aaaaaaaa",
+        "mode": "single",
+        "phase_ids": ["phase-1", "phase-2", "phase-3"],
+        "explicit": True,
+        "current_phase_index": 1,
+        "current_phase_id": "phase-2",
+    }
+    task_meta["phase_status"] = {
+        "phase-1": "completed",
+        "phase-2": "in_progress",
+        "phase-3": "planned",
+    }
+    task_meta["phase_pair_status"] = {
+        "phase-1": {"implement": "completed", "test": "completed"},
+        "phase-2": {"implement": "completed"},
+        "phase-3": {},
+    }
+    paths["task_meta_file"].write_text(json.dumps(task_meta, indent=2) + "\n", encoding="utf-8")
+
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(
+        superloop,
+        "run_codex_phase",
+        lambda *args, **kwargs: calls.append((args[4], args[3], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
+    )
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "implement,test",
+            "--task-id",
+            "resume-phase-task",
+            "--resume",
+            "--run-id",
+            "run-20260319T010101Z-aaaaaaaa",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    assert [(pair, phase_id) for pair, _phase_name, phase_id in calls] == [
+        ("test", "phase-2"),
+        ("test", "phase-2"),
+        ("implement", "phase-3"),
+        ("implement", "phase-3"),
+        ("test", "phase-3"),
+        ("test", "phase-3"),
+    ]
+
+    events = [
+        json.loads(line)
+        for line in run_paths["events_file"].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    phase_scope_events = [event for event in events if event["event_type"] == "phase_scope_resolved"]
+    phase2_started_events = [
+        event for event in events if event["event_type"] == "phase_started" and event.get("phase_id") == "phase-2"
+    ]
+    phase2_deferred_events = [
+        event for event in events if event["event_type"] == "phase_deferred" and event.get("phase_id") == "phase-2"
+    ]
+    phase2_completed_events = [
+        event for event in events if event["event_type"] == "phase_completed" and event.get("phase_id") == "phase-2"
+    ]
+    phase3_completed_events = [
+        event for event in events if event["event_type"] == "phase_completed" and event.get("phase_id") == "phase-3"
+    ]
+    assert len(phase_scope_events) == 1
+    assert len(phase2_started_events) == 1
+    assert len(phase2_deferred_events) == 1
+    assert len(phase2_completed_events) == 1
+    assert len(phase3_completed_events) == 1
+
+    updated_task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    assert updated_task_meta["phase_status"]["phase-2"] == "completed"
+    assert updated_task_meta["phase_status"]["phase-3"] == "completed"
+    assert updated_task_meta["phase_pair_status"]["phase-2"]["implement"] == "completed"
+    assert updated_task_meta["phase_pair_status"]["phase-2"]["test"] == "completed"
+    assert updated_task_meta["phase_pair_status"]["phase-3"]["implement"] == "completed"
+    assert updated_task_meta["phase_pair_status"]["phase-3"]["test"] == "completed"
+
+
+def test_main_test_only_requires_prior_implement_completion(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="test-only-phase-task",
+        product_intent="Explicit test-only request",
+        intent_mode="replace",
+    )
+    write_phase_plan(phase_plan_file(paths["task_dir"]), "test-only-phase-task")
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "test",
+            "--task-id",
+            "test-only-phase-task",
+            "--phase-id",
+            "phase-1",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 1
+
+    task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    assert task_meta["phase_status"]["phase-1"] != "completed"
+    assert task_meta["phase_pair_status"]["phase-1"] == {}
+
+
+def test_main_implement_without_phase_plan_uses_implicit_phase(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="legacy-phase-task",
+        product_intent="Legacy request",
+        intent_mode="replace",
+    )
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "implement",
+            "--task-id",
+            "legacy-phase-task",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+
+    task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
+    assert task_meta["phase_status"]["implicit-phase"] == "completed"
