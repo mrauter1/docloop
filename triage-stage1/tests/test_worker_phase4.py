@@ -29,6 +29,7 @@ from shared.models import (
 )
 from shared.tickets import (
     add_requester_reply,
+    create_pending_ai_run,
     create_requester_ticket,
     create_ticket_message,
 )
@@ -153,6 +154,27 @@ def _clarification_payload(question: str = "Which export screen are you using?")
         "auto_public_reply_allowed": False,
         "public_reply_markdown": question,
         "internal_note_markdown": "Internal ambiguity summary.",
+    }
+
+
+def _draft_payload(public_reply_markdown: str = "Please review this draft reply.") -> dict[str, object]:
+    return {
+        "ticket_class": "bug",
+        "confidence": 0.72,
+        "impact_level": "medium",
+        "requester_language": "en",
+        "summary_short": "Needs review",
+        "summary_internal": "The ticket needs a human-reviewed public response.",
+        "development_needed": True,
+        "needs_clarification": False,
+        "clarifying_questions": [],
+        "incorrect_or_conflicting_details": [],
+        "evidence_found": True,
+        "relevant_paths": [{"path": "app/import.py", "reason": "Likely related implementation path."}],
+        "recommended_next_action": "draft_public_reply",
+        "auto_public_reply_allowed": False,
+        "public_reply_markdown": public_reply_markdown,
+        "internal_note_markdown": "Internal summary for reviewer approval.",
     }
 
 
@@ -485,6 +507,133 @@ def test_worker_skips_non_manual_run_when_fingerprint_matches_last_processed_has
         assert run_db is not None
         assert run_db.status == AiRunStatus.SKIPPED.value
         assert ai_messages == []
+
+
+def test_worker_processes_manual_rerun_even_when_fingerprint_matches_last_processed_hash(monkeypatch) -> None:
+    session_factory, settings, _ = build_session_factory()
+    requester = seed_user(session_factory, email="manual@example.com", role=UserRole.REQUESTER.value)
+    ops_user = seed_user(session_factory, email="ops-manual@example.com", role=UserRole.DEV_TI.value)
+    ticket, run = create_ticket_fixture(
+        session_factory,
+        creator=requester,
+        title="Manual rerun request",
+        body="Please retry triage.",
+        created_at=datetime(2026, 3, 20, 12, 30, tzinfo=timezone.utc),
+    )
+
+    with session_factory() as session:
+        ticket_db = session.get(Ticket, ticket.id)
+        ops_db = session.get(User, ops_user.id)
+        run_db = session.get(AiRun, run.id)
+        assert ticket_db is not None
+        assert ops_db is not None
+        assert run_db is not None
+        context = load_ticket_run_context(session, ticket_id=ticket.id)
+        ticket_db.last_processed_hash = compute_publication_fingerprint(context)
+        run_db.status = AiRunStatus.SUCCEEDED.value
+        run_db.ended_at = datetime(2026, 3, 20, 12, 31, tzinfo=timezone.utc)
+        session.flush()
+        create_pending_ai_run(
+            session,
+            ticket_id=ticket.id,
+            triggered_by="manual_rerun",
+            requested_by_user_id=ops_db.id,
+            created_at=datetime(2026, 3, 20, 12, 32, tzinfo=timezone.utc),
+        )
+        session.commit()
+
+    payload = _success_payload(public_reply_markdown="Manual rerun completed successfully.")
+
+    def fake_run_codex(prepared_run, *, settings):
+        prepared_run.final_output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return CodexRunResult(payload=payload, stdout="", stderr="")
+
+    monkeypatch.setattr("worker.main.run_codex", fake_run_codex)
+
+    status = process_next_run(
+        session_factory,
+        settings=settings,
+        claimed_at=datetime(2026, 3, 20, 12, 33, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 3, 20, 12, 34, tzinfo=timezone.utc),
+    )
+    assert status == AiRunStatus.SUCCEEDED.value
+
+    with session_factory() as session:
+        runs = session.scalars(
+            sa.select(AiRun).where(AiRun.ticket_id == ticket.id).order_by(AiRun.created_at.asc(), AiRun.id.asc())
+        ).all()
+        public_messages = session.scalars(
+            sa.select(TicketMessage).where(
+                TicketMessage.ticket_id == ticket.id,
+                TicketMessage.source == MessageSource.AI_AUTO_PUBLIC.value,
+            )
+        ).all()
+        assert [item.status for item in runs] == [AiRunStatus.SUCCEEDED.value, AiRunStatus.SUCCEEDED.value]
+        assert runs[-1].triggered_by == "manual_rerun"
+        assert len(public_messages) == 1
+
+
+def test_worker_new_draft_supersedes_older_pending_draft(monkeypatch) -> None:
+    session_factory, settings, _ = build_session_factory()
+    requester = seed_user(session_factory, email="drafts@example.com", role=UserRole.REQUESTER.value)
+    ticket, current_run = create_ticket_fixture(
+        session_factory,
+        creator=requester,
+        title="Draft supersede",
+        body="Need a reviewed reply.",
+        created_at=datetime(2026, 3, 20, 12, 45, tzinfo=timezone.utc),
+    )
+
+    with session_factory() as session:
+        current_run_db = session.get(AiRun, current_run.id)
+        assert current_run_db is not None
+        historical_run = AiRun(
+            ticket_id=ticket.id,
+            status=AiRunStatus.SUCCEEDED.value,
+            triggered_by="new_ticket",
+            requested_by_user_id=requester.id,
+            created_at=datetime(2026, 3, 20, 12, 44, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 3, 20, 12, 44, tzinfo=timezone.utc),
+        )
+        session.add(historical_run)
+        session.flush()
+        session.add(
+            AiDraft(
+                ticket_id=ticket.id,
+                ai_run_id=historical_run.id,
+                kind="public_reply",
+                body_markdown="Older pending draft.",
+                body_text="Older pending draft.",
+                status=AiDraftStatus.PENDING_APPROVAL.value,
+                created_at=datetime(2026, 3, 20, 12, 44, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()
+
+    payload = _draft_payload(public_reply_markdown="New draft awaiting review.")
+
+    def fake_run_codex(prepared_run, *, settings):
+        prepared_run.final_output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return CodexRunResult(payload=payload, stdout="", stderr="")
+
+    monkeypatch.setattr("worker.main.run_codex", fake_run_codex)
+
+    status = process_next_run(
+        session_factory,
+        settings=settings,
+        claimed_at=datetime(2026, 3, 20, 12, 46, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 3, 20, 12, 47, tzinfo=timezone.utc),
+    )
+    assert status == AiRunStatus.SUCCEEDED.value
+
+    with session_factory() as session:
+        drafts = session.scalars(
+            sa.select(AiDraft).where(AiDraft.ticket_id == ticket.id).order_by(AiDraft.created_at.asc(), AiDraft.id.asc())
+        ).all()
+        assert len(drafts) == 2
+        assert drafts[0].status == AiDraftStatus.SUPERSEDED.value
+        assert drafts[1].status == AiDraftStatus.PENDING_APPROVAL.value
+        assert drafts[1].body_text == "New draft awaiting review."
 
 
 def test_worker_failure_routes_ticket_to_dev_ti_and_adds_internal_failure_note(monkeypatch) -> None:

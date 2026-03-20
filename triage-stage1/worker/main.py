@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
 import logging
 import time
 import uuid
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from shared.config import Settings, get_settings
 from shared.db import make_session_factory, session_scope
+from shared.logging import configure_logging, log_event
 from shared.models import AiRun, AiRunStatus, AiRunTrigger, SystemState, Ticket, TicketStatus
 from shared.tickets import change_ticket_status
 from worker.codex_runner import (
@@ -59,8 +59,7 @@ def _message_dicts(messages) -> list[dict[str, str]]:
 
 
 def _log(event: str, **fields: object) -> None:
-    payload = {"event": event, "service": "worker", **fields}
-    LOGGER.info(json.dumps(payload, default=str))
+    log_event(LOGGER, service="worker", event=event, **fields)
 
 
 def claim_next_run(
@@ -305,7 +304,7 @@ def run_worker_loop(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    configure_logging(service="worker")
     run_worker_loop()
 
 
