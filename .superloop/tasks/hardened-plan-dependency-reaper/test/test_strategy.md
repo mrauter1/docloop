@@ -62,6 +62,7 @@ Phase 2 covers the Stage 1 auth and worker hardening slice:
 | AC-P2-3 requeue behavior: reaper failure path enqueues the deferred requeue and clears the ticket flag | New reaper + queue integration coverage | `tests/test_stuck_run_reaper.py::test_reaper_enqueues_deferred_requeue_when_requested` |
 | AC-P2-3 default-threshold behavior: reaper uses `CODEX_TIMEOUT_SECONDS * 2` when `max_age_seconds` is omitted | New reaper default-threshold coverage | `tests/test_stuck_run_reaper.py::test_reaper_uses_double_codex_timeout_as_default_threshold` |
 | AC-P2-3 script contract: manual reaper entrypoint returns exit `0` and structured JSON | New management-script coverage using `capsys` | `tests/test_stuck_run_reaper.py::test_reap_stuck_runs_script_outputs_json` |
+| Reaper concurrency guard: only one caller can claim and reap the same stuck run while the other call becomes a no-op | New threaded regression around two concurrent `reap_stuck_runs(...)` calls against one stale `running` row | `tests/test_stuck_run_reaper.py::test_reaper_claims_each_stuck_run_once_under_concurrent_calls` |
 | AC-P2-4 regression shield: the full Stage 1 suite remains green in the pinned environment after the hardening slice and on the final diff | Full pinned-environment suite runs | `cd /workspace/docloop/triage-stage1 && /tmp/triage-stage1-locktest/bin/python -m pytest tests/ -v` |
 
 ## Phase 2 Determinism / flake controls
@@ -69,11 +70,12 @@ Phase 2 covers the Stage 1 auth and worker hardening slice:
 - Auth browser-submit coverage uses `TestClient` cookie persistence from `GET /login` to `POST /login` instead of synthetic token injection, matching browser behavior without network nondeterminism.
 - Worker queue race coverage uses deterministic monkeypatched `ActiveAIRunExistsError` and `IntegrityError` paths instead of trying to create real timing-sensitive concurrent writers.
 - Reaper coverage uses explicit UTC timestamps and local SQLite fixture databases, so age-threshold and ordering assertions are time-stable.
+- The concurrent reaper regression coordinates its two threads with `threading.Event` gates instead of fixed sleeps, so the single-claimer assertion does not depend on scheduler timing.
 - Script coverage calls `main(..., settings=..., session_factory=...)` directly and captures stdout with `capsys`, avoiding subprocess timing and environment drift.
 - The pinned-environment validation stays on `/tmp/triage-stage1-locktest/bin/python`, matching the locked dependency baseline established in phase 1.
 
 ## Phase 2 Test additions
 
 - Added `triage-stage1/tests/test_phase2_auth_worker_hardening.py` for browser-submit login CSRF, deferred requeue race handling, and crossed-completion idempotence.
-- Added `triage-stage1/tests/test_stuck_run_reaper.py` with the six requested reaper and manual-script regression tests.
-- Verified the two new modules first (`12 passed`) before running the full pinned-environment Stage 1 suite twice on the phase-2 diff (`65 passed` both times).
+- Added `triage-stage1/tests/test_stuck_run_reaper.py` with the six requested reaper and manual-script regression tests plus a concurrent single-claimer regression for the reaper claim hardening.
+- Verified the two new modules first (`13 passed`) before running the full pinned-environment Stage 1 suite on the final phase-2 diff (`66 passed`).

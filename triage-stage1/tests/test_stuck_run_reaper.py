@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
+import threading
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
@@ -25,6 +26,7 @@ from shared.models import (
 )
 from shared.security import hash_password
 from shared.tickets import create_requester_ticket
+from worker import main as worker_main
 from worker.main import reap_stuck_runs
 
 
@@ -367,3 +369,93 @@ def test_reap_stuck_runs_script_outputs_json(capsys) -> None:
 
     assert exit_code == 0
     assert json.loads(output.out) == {"status": "ok", "reaped_count": 1}
+
+
+def test_reaper_claims_each_stuck_run_once_under_concurrent_calls(monkeypatch) -> None:
+    session_factory, settings = build_session_factory()
+    requester = seed_user(
+        session_factory,
+        email="concurrent-reaper@example.com",
+        role=UserRole.REQUESTER.value,
+    )
+    ticket, run = create_ticket_fixture(
+        session_factory,
+        creator=requester,
+        title="Concurrent reaper",
+        body="Body",
+        created_at=datetime(2026, 3, 20, 15, tzinfo=timezone.utc),
+    )
+    mark_run_running(
+        session_factory,
+        ticket_id=ticket.id,
+        run_id=run.id,
+        started_at=datetime(2026, 3, 20, 15, 56, 40, tzinfo=timezone.utc),
+    )
+
+    entered_finalize = threading.Event()
+    release_finalize = threading.Event()
+    second_started = threading.Event()
+    finalize_calls: list[str] = []
+    thread_errors: list[BaseException] = []
+    real_finalize_failure = worker_main.finalize_failure
+
+    def blocking_finalize_failure(session, *, ticket, run, error_text, completed_at):
+        finalize_calls.append(str(run.id))
+        if not entered_finalize.is_set():
+            entered_finalize.set()
+            assert release_finalize.wait(timeout=5)
+        return real_finalize_failure(
+            session,
+            ticket=ticket,
+            run=run,
+            error_text=error_text,
+            completed_at=completed_at,
+        )
+
+    monkeypatch.setattr(worker_main, "finalize_failure", blocking_finalize_failure)
+
+    results: dict[str, int] = {}
+
+    def invoke_reaper(name: str) -> None:
+        try:
+            if name == "second":
+                second_started.set()
+            results[name] = reap_stuck_runs(
+                session_factory,
+                settings=settings,
+                max_age_seconds=150,
+                reaped_at=datetime(2026, 3, 20, 16, tzinfo=timezone.utc),
+            )
+        except BaseException as exc:  # pragma: no cover - assertion re-raised below
+            thread_errors.append(exc)
+
+    first = threading.Thread(target=invoke_reaper, args=("first",))
+    second = threading.Thread(target=invoke_reaper, args=("second",))
+
+    first.start()
+    assert entered_finalize.wait(timeout=5)
+    second.start()
+    assert second_started.wait(timeout=5)
+    release_finalize.set()
+
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert thread_errors == []
+    assert sorted(results.values()) == [0, 1]
+    assert finalize_calls == [str(run.id)]
+
+    with session_factory() as session:
+        run_db = session.get(AiRun, run.id)
+        system_notes = session.scalars(
+            sa.select(TicketMessage).where(
+                TicketMessage.ticket_id == ticket.id,
+                TicketMessage.source == MessageSource.SYSTEM.value,
+                TicketMessage.visibility == MessageVisibility.INTERNAL.value,
+            )
+        ).all()
+        assert run_db is not None
+        assert run_db.status == AiRunStatus.FAILED.value
+        assert len(system_notes) == 1

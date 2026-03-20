@@ -37,8 +37,10 @@
 - Browser login forms now render a concrete hidden CSRF token in the initial HTML response instead of relying on post-render context mutation.
 - Worker completion paths now treat already-terminal runs as resolved and only clear requeue flags after queue state is safely established.
 - Worker polling now automatically reaps stale `running` rows whose age exceeds twice `CODEX_TIMEOUT_SECONDS`, with an equivalent manual script for operators.
+- Stuck-run reaping now claims candidates before publishing failure side effects so concurrent worker loops cannot double-reap the same run.
 
 ## Deduplication / centralization decisions
 
 - Centralized login-form re-rendering in `triage-stage1/app/routes_auth.py` via a single `_login_template_response(...)` helper so the GET, 403, and invalid-credential branches all issue aligned CSRF token context plus cookie pairs.
 - Reused `finalize_failure(...)` as the single stuck-run recovery path instead of duplicating failure routing logic in the reaper.
+- Kept the reaper concurrency hardening inside `triage-stage1/worker/main.py` with a single claim helper that uses `FOR UPDATE SKIP LOCKED` on PostgreSQL and a compare-and-swap fallback on `AiRun.error_text` elsewhere, avoiding schema or config changes.
