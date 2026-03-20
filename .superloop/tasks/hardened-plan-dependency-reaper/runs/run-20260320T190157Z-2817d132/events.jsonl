@@ -1,0 +1,2 @@
+{"ts": "2026-03-20T19:01:57.383792+00:00", "run_id": "run-20260320T190157Z-2817d132", "seq": 1, "event_type": "run_started", "workspace": "/workspace/docloop", "pairs": ["implement", "test"], "max_iterations": 15, "use_git": false, "task_id": "hardened-plan-dependency-reaper", "task_root": ".superloop/tasks/hardened-plan-dependency-reaper"}
+{"ts": "2026-03-20T19:01:57.386554+00:00", "run_id": "run-20260320T190157Z-2817d132", "seq": 2, "event_type": "run_finished", "status": "fatal_error", "exit_code": 1}

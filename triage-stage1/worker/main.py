@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 import uuid
 
+import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from shared.config import Settings, get_settings
@@ -33,6 +34,7 @@ from worker.triage import (
 
 LOGGER = logging.getLogger("triage-stage1.worker")
 HEARTBEAT_KEY = "worker_heartbeat"
+REAPER_CLAIM_PREFIX = "__reaper_claim__"
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,64 @@ def _message_dicts(messages) -> list[dict[str, str]]:
 
 def _log(event: str, **fields: object) -> None:
     log_event(LOGGER, service="worker", event=event, **fields)
+
+
+def _stuck_run_query(*, cutoff: datetime) -> sa.Select:
+    return (
+        sa.select(AiRun)
+        .where(
+            AiRun.status == AiRunStatus.RUNNING.value,
+            AiRun.started_at.is_not(None),
+            AiRun.started_at < cutoff,
+        )
+        .order_by(AiRun.started_at.asc(), AiRun.id.asc())
+    )
+
+
+def _stuck_run_claim_token(*, run_id: uuid.UUID, claimed_at: datetime) -> str:
+    return f"{REAPER_CLAIM_PREFIX}:{claimed_at.isoformat()}:{run_id}"
+
+
+def _claim_stuck_runs(
+    session: Session,
+    *,
+    cutoff: datetime,
+    claimed_at: datetime,
+) -> list[AiRun]:
+    bind = session.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        return session.scalars(_stuck_run_query(cutoff=cutoff).with_for_update(skip_locked=True)).all()
+
+    candidates = session.execute(
+        sa.select(AiRun.id, AiRun.error_text)
+        .where(
+            AiRun.status == AiRunStatus.RUNNING.value,
+            AiRun.started_at.is_not(None),
+            AiRun.started_at < cutoff,
+        )
+        .order_by(AiRun.started_at.asc(), AiRun.id.asc())
+    ).all()
+    claimed_runs: list[AiRun] = []
+    for run_id, current_error_text in candidates:
+        claim = sa.update(AiRun).where(
+            AiRun.id == run_id,
+            AiRun.status == AiRunStatus.RUNNING.value,
+            AiRun.started_at.is_not(None),
+            AiRun.started_at < cutoff,
+        )
+        if current_error_text is None:
+            claim = claim.where(AiRun.error_text.is_(None))
+        else:
+            claim = claim.where(AiRun.error_text == current_error_text)
+        claim_result = session.execute(
+            claim.values(error_text=_stuck_run_claim_token(run_id=run_id, claimed_at=claimed_at))
+        )
+        if claim_result.rowcount != 1:
+            continue
+        claimed_run = session.get(AiRun, run_id)
+        if claimed_run is not None:
+            claimed_runs.append(claimed_run)
+    return claimed_runs
 
 
 def claim_next_run(
@@ -156,6 +216,8 @@ def finish_prepared_run(
         ticket = session.get(Ticket, execution.ticket_id)
         if run is None or ticket is None:
             raise LookupError("Run or ticket disappeared while finishing worker execution")
+        if run.status != AiRunStatus.RUNNING.value:
+            return run.status
 
         if error_text is not None or payload is None:
             result = finalize_failure(
@@ -247,6 +309,55 @@ def finish_prepared_run(
         return result.run_status
 
 
+def reap_stuck_runs(
+    session_factory: sessionmaker[Session],
+    *,
+    settings: Settings,
+    max_age_seconds: int | None = None,
+    reaped_at: datetime | None = None,
+) -> int:
+    resolved_max_age = (
+        max_age_seconds if max_age_seconds is not None else settings.codex_timeout_seconds * 2
+    )
+    resolved_reaped_at = reaped_at or now_utc()
+    cutoff = resolved_reaped_at - timedelta(seconds=resolved_max_age)
+    reaped_count = 0
+
+    with session_scope(session_factory) as session:
+        runs = _claim_stuck_runs(session, cutoff=cutoff, claimed_at=resolved_reaped_at)
+
+        for run in runs:
+            ticket = session.get(Ticket, run.ticket_id)
+            if ticket is None or run.started_at is None:
+                continue
+
+            result = finalize_failure(
+                session,
+                ticket=ticket,
+                run=run,
+                error_text=(
+                    "Run stuck in running state for over "
+                    f"{resolved_max_age} seconds (started at {run.started_at.isoformat()}). "
+                    "Reaped by worker."
+                ),
+                completed_at=resolved_reaped_at,
+            )
+            if result.run_status != AiRunStatus.FAILED.value:
+                continue
+
+            reaped_count += 1
+            _log(
+                "ai_run_reaped",
+                run_id=run.id,
+                ticket_reference=ticket.reference,
+                queued_requeue_run_id=result.queued_requeue_run_id,
+                started_at=run.started_at.isoformat(),
+                max_age_seconds=resolved_max_age,
+            )
+
+    return reaped_count
+
+
 def process_next_run(
     session_factory: sessionmaker[Session],
     *,
@@ -297,6 +408,11 @@ def run_worker_loop(
             update_worker_heartbeat(resolved_session_factory, heartbeat_at=current)
             last_heartbeat_at = current
 
+        reap_stuck_runs(
+            resolved_session_factory,
+            settings=resolved_settings,
+            reaped_at=current,
+        )
         process_next_run(resolved_session_factory, settings=resolved_settings)
         if once:
             return

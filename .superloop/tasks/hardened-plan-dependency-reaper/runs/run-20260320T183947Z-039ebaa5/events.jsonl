@@ -1,0 +1,7 @@
+{"ts": "2026-03-20T18:39:47.079208+00:00", "run_id": "run-20260320T183947Z-039ebaa5", "seq": 1, "event_type": "run_started", "workspace": "/workspace/docloop", "pairs": ["plan", "implement", "test"], "max_iterations": 15, "use_git": false, "task_id": "hardened-plan-dependency-reaper", "task_root": ".superloop/tasks/hardened-plan-dependency-reaper"}
+{"ts": "2026-03-20T18:39:47.079358+00:00", "run_id": "run-20260320T183947Z-039ebaa5", "seq": 2, "event_type": "pair_started", "pair": "plan", "phase_id": null}
+{"ts": "2026-03-20T18:39:47.079391+00:00", "run_id": "run-20260320T183947Z-039ebaa5", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1, "phase_id": null}
+{"ts": "2026-03-20T18:43:21.637850+00:00", "run_id": "run-20260320T183947Z-039ebaa5", "seq": 4, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": null}
+{"ts": "2026-03-20T18:44:03.626561+00:00", "run_id": "run-20260320T183947Z-039ebaa5", "seq": 5, "event_type": "phase_finished", "pair": "plan", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": null}
+{"ts": "2026-03-20T18:44:03.626906+00:00", "run_id": "run-20260320T183947Z-039ebaa5", "seq": 6, "event_type": "pair_completed", "pair": "plan", "cycle": 1, "attempt": 1, "phase_id": null}
+{"ts": "2026-03-20T18:44:03.629818+00:00", "run_id": "run-20260320T183947Z-039ebaa5", "seq": 7, "event_type": "run_finished", "status": "fatal_error", "exit_code": 1}

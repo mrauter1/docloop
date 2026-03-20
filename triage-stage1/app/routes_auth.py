@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,36 @@ from shared.security import normalize_email, verify_password
 router = APIRouter()
 
 
+def _login_template_response(
+    request: Request,
+    *,
+    auth: AuthContext | None,
+    error: str | None = None,
+    ops_pending: bool = False,
+    status_code: int = status.HTTP_200_OK,
+):
+    settings = get_settings(request)
+    templates = get_templates(request)
+    csrf_response = Response(status_code=status_code)
+    csrf_token = issue_login_csrf(csrf_response, settings)
+    response = templates.TemplateResponse(
+        request,
+        "login.html",
+        template_context(
+            request,
+            auth=auth,
+            csrf_token=csrf_token,
+            error=error,
+            ops_pending=ops_pending,
+        ),
+        status_code=status_code,
+    )
+    for header_name, header_value in csrf_response.raw_headers:
+        if header_name.lower() == b"set-cookie":
+            response.raw_headers.append((header_name, header_value))
+    return response
+
+
 @router.get("/login")
 def login_page(
     request: Request,
@@ -37,22 +67,12 @@ def login_page(
         redirect_url = "/app" if auth.user.role == UserRole.REQUESTER.value else "/ops"
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_303_SEE_OTHER)
 
-    settings = get_settings(request)
-    templates = get_templates(request)
-    response = templates.TemplateResponse(
+    return _login_template_response(
         request,
-        "login.html",
-        template_context(
-            request,
-            auth=auth,
-            error=request.query_params.get("error"),
-            ops_pending=request.query_params.get("ops_pending") == "1",
-        ),
+        auth=auth,
+        error=request.query_params.get("error"),
+        ops_pending=request.query_params.get("ops_pending") == "1",
     )
-    if auth is None:
-        csrf_token = issue_login_csrf(response, settings)
-        response.context["csrf_token"] = csrf_token
-    return response
 
 
 @router.post("/login")
@@ -67,21 +87,18 @@ async def login_submit(
 
     form = await request.form()
     settings = get_settings(request)
-    templates = get_templates(request)
     email = normalize_email(str(form.get("email", "")))
     password = str(form.get("password", ""))
     remember_me = str(form.get("remember_me", "")).lower() in {"1", "true", "on", "yes"}
     submitted_csrf = str(form.get("csrf_token", ""))
 
     if not validate_login_csrf(request, submitted_csrf, settings):
-        response = templates.TemplateResponse(
+        return _login_template_response(
             request,
-            "login.html",
-            template_context(request, auth=None, error="Invalid login form session."),
+            auth=None,
+            error="Invalid login form session.",
             status_code=status.HTTP_403_FORBIDDEN,
         )
-        response.context["csrf_token"] = issue_login_csrf(response, settings)
-        return response
 
     user = db.scalar(
         select(User).where(
@@ -90,14 +107,12 @@ async def login_submit(
         )
     )
     if user is None or not verify_password(user.password_hash, password):
-        response = templates.TemplateResponse(
+        return _login_template_response(
             request,
-            "login.html",
-            template_context(request, auth=None, error="Invalid email or password."),
+            auth=None,
+            error="Invalid email or password.",
             status_code=status.HTTP_400_BAD_REQUEST,
         )
-        response.context["csrf_token"] = issue_login_csrf(response, settings)
-        return response
 
     _, raw_token = create_session(
         db,

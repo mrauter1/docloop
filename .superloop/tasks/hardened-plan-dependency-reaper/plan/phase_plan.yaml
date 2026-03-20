@@ -1,0 +1,89 @@
+version: 1
+task_id: hardened-plan-dependency-reaper
+request_snapshot_ref: .superloop/tasks/hardened-plan-dependency-reaper/runs/run-20260320T185030Z-91280ace/request.md
+phases:
+  - phase_id: phase-1
+    title: Reproducible dependency baseline
+    objective: Freeze and bound the `triage-stage1/` dependency set first so all later auth/worker hardening is validated against a known Python 3.12 environment.
+    in_scope:
+      - Create `triage-stage1/requirements.lock` from a clean Python 3.12 install of the current Stage 1 dependency set.
+      - Rewrite `triage-stage1/requirements.txt` so every direct dependency is bounded from the resolved install version, and add explicit `markupsafe`.
+      - Update `triage-stage1/README.md` Local Setup guidance to mention `pip install -r requirements.lock` for reproducible installs.
+      - Verify the full Stage 1 suite from installs based on both `requirements.lock` and the bounded `requirements.txt`.
+    out_of_scope:
+      - Auth route, worker queue, or reaper code changes.
+      - Repo-root dependency files or README updates outside `triage-stage1/`.
+      - Any modification to existing tests.
+    dependencies:
+      - Python 3.12 environment available for clean install and freeze.
+      - Network/package index access sufficient to resolve Stage 1 dependencies.
+      - Validation must run from `cd /workspace/docloop/triage-stage1 && python -m pytest tests/ -v`.
+    acceptance_criteria:
+      - id: AC-P1-1
+        text: "triage-stage1/requirements.lock exists and contains exact == pins for the full resolved install."
+      - id: AC-P1-2
+        text: "triage-stage1/requirements.txt contains bounded direct dependencies derived from the resolved install, including markupsafe."
+      - id: AC-P1-3
+        text: Fresh installs from both dependency files pass `cd /workspace/docloop/triage-stage1 && python -m pytest tests/ -v`.
+    future_phase_deferments:
+      - Browser login CSRF robustness in `triage-stage1/app/routes_auth.py`.
+      - Deferred requeue race hardening in `triage-stage1/worker/queue.py`.
+      - Stuck-run reaper delivery in `triage-stage1/worker/main.py` and `triage-stage1/scripts/`.
+    deliverables:
+      - dependencies
+      - docs
+      - validation
+    risks:
+      - Freezing from the wrong interpreter or a dirty environment will make the lockfile misleading.
+      - Bounds that are too loose can regress multipart/form behavior already used by requester routes.
+      - Planning or implementation outside `triage-stage1/` would miss the only live Stage 1 surfaces that match the request.
+    rollback:
+      - Recreate the clean Python 3.12 environment and regenerate the lock/bounds before any code hardening starts.
+    status: planned
+  - phase_id: phase-2
+    title: Auth and worker hardening
+    objective: Fix the two confirmed production defects and deliver the stuck-run reaper on top of the pinned Stage 1 environment without changing schema, config, or existing test files.
+    in_scope:
+      - Fix `triage-stage1/app/routes_auth.py` so the login page renders a concrete hidden CSRF token in the initial template context.
+      - Add new auth regression coverage that uses the hidden token from rendered HTML, preserves 403 behavior on tampered CSRF, and confirms requester/Dev-TI redirects still work.
+      - Harden `triage-stage1/worker/queue.py` so deferred requeue creation tolerates active-run uniqueness races and only clears requeue flags when queue state is resolved safely.
+      - Add crossed-completion idempotence controls so worker finalization and stuck-run reaping cannot double-publish or lose queue intent.
+      - Add `reap_stuck_runs(...)` to `triage-stage1/worker/main.py`, invoke it from each worker polling cycle, add `triage-stage1/scripts/reap_stuck_runs.py`, and add `triage-stage1/tests/test_stuck_run_reaper.py`.
+      - Update `triage-stage1/README.md` Management commands to document automatic and manual reaping.
+      - Run the full Stage 1 suite after the hardening slice and once more at the end.
+    out_of_scope:
+      - Schema migrations or new configuration variables.
+      - Worker architecture refactors unrelated to the confirmed defects and reaper.
+      - Modifying existing tests instead of adding new focused regression modules.
+      - Repo-root code or documentation changes.
+    dependencies:
+      - phase-1
+      - Existing Stage 1 helper contracts in `worker/triage.py`, `shared/tickets.py`, and `scripts/_common.py` remain the reuse points; do not duplicate logic.
+      - Deferred requeue hardening must tolerate both helper-level `ActiveAIRunExistsError` and the database partial-index uniqueness race without weakening the one-active-run invariant.
+      - Reaper threshold must derive from existing `Settings.codex_timeout_seconds`; no new config may be introduced.
+    acceptance_criteria:
+      - id: AC-P2-1
+        text: Browser-style login using the hidden form token succeeds, while tampered login CSRF still fails with 403 and role redirects remain unchanged.
+      - id: AC-P2-2
+        text: Deferred requeue handling no longer crashes on the active-run uniqueness race, preserves requeue intent, and leaves at most one active run per ticket.
+      - id: AC-P2-3
+        text: "reap_stuck_runs(...), the worker-loop integration, the manual script, and the six requested reaper tests are present and pass."
+      - id: AC-P2-4
+        text: The full Stage 1 suite passes in the pinned environment with no existing test modified.
+    future_phase_deferments:
+      - No additional deferments inside this task; completing this phase should close the requested hardening scope.
+    deliverables:
+      - code
+      - scripts
+      - tests
+      - docs
+      - validation
+    risks:
+      - Crossed completion between worker finalize and reaper finalize can create duplicate ticket mutations if idempotence is incomplete.
+      - Over-broad `IntegrityError` handling could mask unrelated database problems.
+      - Restricting changes to new tests only increases the need for a clearly separated regression module layout.
+      - SQLite test runs will not naturally prove the PostgreSQL partial-index race unless the regression coverage simulates the conflicting queue/finalize path deterministically.
+      - The worker loop currently throttles heartbeat writes to once per 60 seconds, so reaper integration must run each poll cycle independently of whether a heartbeat write occurred.
+    rollback:
+      - Disable reaper invocation and keep the queue helper fix isolated if crossover/idempotence regressions appear during validation, then reintroduce the reaper only after the queue/finalizer path is stable.
+    status: planned

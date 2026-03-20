@@ -24,6 +24,12 @@ python3.12 -m venv .venv
 pip install -r requirements.txt
 ```
 
+For reproducible installs that match the validated Stage 1 test environment, use:
+
+```bash
+pip install -r requirements.lock
+```
+
 **Environment**
 
 Copy `.env.example` and provide all required values. Recommended defaults already match the PRD for:
@@ -66,6 +72,15 @@ python scripts/create_admin.py --email admin@example.com --display-name "Admin U
 python scripts/create_user.py --email requester@example.com --display-name "Requester User" --password "change-me" --role requester
 python scripts/set_password.py --email requester@example.com --password "new-secret"
 python scripts/deactivate_user.py --email requester@example.com
+```
+
+**Stuck-run reaper**
+
+The worker automatically reaps AI runs stuck in `running` state for longer than twice the configured `CODEX_TIMEOUT_SECONDS`. This handles cases where the worker process was killed mid-execution. To run the reaper manually:
+
+```bash
+python scripts/reap_stuck_runs.py
+python scripts/reap_stuck_runs.py --max-age-seconds 300
 ```
 
 **Run**
