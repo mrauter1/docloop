@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 import tempfile
@@ -11,8 +12,21 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app
 from shared.config import Settings
-from shared.models import AiRun, AttachmentVisibility, Base, SessionRecord, Ticket, TicketAttachment, TicketMessage, User, UserRole
+from shared.models import (
+    AiRun,
+    AttachmentVisibility,
+    Base,
+    SessionRecord,
+    Ticket,
+    TicketAttachment,
+    TicketMessage,
+    TicketStatus,
+    TicketView,
+    User,
+    UserRole,
+)
 from shared.security import SESSION_COOKIE_NAME, hash_password, hash_token
+from shared.tickets import add_public_reply
 
 
 def make_png_bytes(color: str = "red") -> bytes:
@@ -96,6 +110,50 @@ def test_login_creates_server_side_session_with_opaque_cookie() -> None:
         assert record.token_hash == hash_token(raw_token)
         assert record.csrf_token
         assert record.remember_me is True
+
+
+def test_login_cookie_persistence_matches_remember_me_choice() -> None:
+    client, session_factory, _ = build_client()
+    user = seed_user(session_factory, email="session@example.com")
+    fresh_client = TestClient(client.app)
+
+    default_response = login(client, user.email, "password123", remember_me=False)
+    remember_response = login(fresh_client, user.email, "password123", remember_me=True)
+
+    default_cookie_headers = ",".join(default_response.headers.get_list("set-cookie"))
+    remember_cookie_headers = ",".join(remember_response.headers.get_list("set-cookie"))
+
+    assert "triage_session=" in default_cookie_headers
+    assert "Max-Age=2592000" not in default_cookie_headers
+    assert "triage_session=" in remember_cookie_headers
+    assert "Max-Age=2592000" in remember_cookie_headers
+
+    with session_factory() as session:
+        records = session.scalars(sa.select(SessionRecord).order_by(SessionRecord.created_at.asc())).all()
+        assert len(records) == 2
+        assert records[0].remember_me is False
+        assert records[1].remember_me is True
+        default_duration = records[0].expires_at - records[0].created_at
+        remember_duration = records[1].expires_at - records[1].created_at
+        assert timedelta(hours=11) <= default_duration <= timedelta(hours=13)
+        assert timedelta(days=29) <= remember_duration <= timedelta(days=31)
+
+
+def test_expired_session_redirects_requester_back_to_login() -> None:
+    client, session_factory, _ = build_client()
+    user = seed_user(session_factory, email="expired@example.com")
+    assert login(client, user.email, "password123").status_code == 303
+
+    with session_factory() as session:
+        record = session.scalar(sa.select(SessionRecord))
+        assert record is not None
+        record.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        session.commit()
+
+    response = client.get("/app", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
 
 
 def test_requester_can_create_ticket_with_attachment_and_view_it() -> None:
@@ -219,6 +277,60 @@ def test_requester_cannot_access_another_users_ticket_or_attachment() -> None:
 
     assert client.get(detail_url).status_code == 404
     assert client.get(f"/attachments/{attachment_id}").status_code == 404
+
+
+def test_requester_list_marks_ticket_updated_until_ticket_is_opened() -> None:
+    client, session_factory, _ = build_client()
+    requester = seed_user(session_factory, email="updates@example.com")
+    ops_user = seed_user(session_factory, email="ops-updates@example.com", role=UserRole.DEV_TI.value)
+
+    assert login(client, requester.email, "password123").status_code == 303
+    new_page = client.get("/app/tickets/new")
+    csrf_token = new_page.text.split('name="csrf_token" value="', 1)[1].split('"', 1)[0]
+    create_response = client.post(
+        "/app/tickets",
+        data={
+            "csrf_token": csrf_token,
+            "description": "Show me unread marker behavior.",
+        },
+        follow_redirects=False,
+    )
+    detail_url = create_response.headers["location"]
+
+    list_response = client.get("/app/tickets")
+    assert "Updated" not in list_response.text
+
+    with session_factory() as session:
+        ticket = session.scalar(sa.select(Ticket))
+        ticket_view = session.scalar(sa.select(TicketView))
+        ops_db = session.get(User, ops_user.id)
+        assert ticket is not None
+        assert ticket_view is not None
+        assert ops_db is not None
+        seen_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        ticket_view.last_viewed_at = seen_at
+        add_public_reply(
+            session,
+            ticket=ticket,
+            actor=ops_db,
+            body_markdown="We need one more screenshot.",
+            body_text="We need one more screenshot.",
+            next_status=TicketStatus.WAITING_ON_USER,
+            created_at=seen_at + timedelta(minutes=5),
+        )
+        session.commit()
+
+    updated_list_response = client.get("/app/tickets")
+    assert updated_list_response.status_code == 200
+    assert "Updated" in updated_list_response.text
+
+    detail_response = client.get(detail_url)
+    assert detail_response.status_code == 200
+    assert "We need one more screenshot." in detail_response.text
+
+    cleared_list_response = client.get("/app/tickets")
+    assert cleared_list_response.status_code == 200
+    assert "Updated" not in cleared_list_response.text
 
 
 def test_invalid_attachment_type_is_rejected() -> None:

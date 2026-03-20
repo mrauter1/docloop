@@ -6,10 +6,10 @@
   "phase_plan_path": "/workspace/docloop/.superloop/tasks/autosac-prd-plan/plan/phase_plan.yaml",
   "phase_plan_version": 1,
   "active_phase_selection": {
-    "run_id": "run-20260320T015559Z-269081b2",
+    "run_id": "run-20260320T131921Z-4f661e9f",
     "mode": "single",
     "phase_ids": [
-      "phase-4"
+      "phase-6"
     ],
     "explicit": true,
     "current_phase_index": 1,
@@ -19,7 +19,9 @@
     "phase-1": "in_progress",
     "phase-2": "in_progress",
     "phase-3": "completed",
-    "phase-4": "completed"
+    "phase-4": "completed",
+    "phase-5": "completed",
+    "phase-6": "completed"
   },
   "phase_history": [
     {
@@ -58,6 +60,32 @@
       "run_id": "run-20260320T015559Z-269081b2",
       "status": "completed",
       "ts": "2026-03-20T02:16:42.204038+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "phase-5",
+      "run_id": "run-20260320T121533Z-836c39b7",
+      "status": "in_progress",
+      "ts": "2026-03-20T12:15:33.506058+00:00"
+    },
+    {
+      "phase_id": "phase-5",
+      "run_id": "run-20260320T121533Z-836c39b7",
+      "status": "completed",
+      "ts": "2026-03-20T12:26:39.430670+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "phase-6",
+      "run_id": "run-20260320T131921Z-4f661e9f",
+      "status": "in_progress",
+      "ts": "2026-03-20T13:19:21.707306+00:00"
+    },
+    {
+      "phase_id": "phase-6",
+      "run_id": "run-20260320T131921Z-4f661e9f",
+      "status": "completed",
+      "ts": "2026-03-20T13:29:51.259866+00:00",
       "pair": "test"
     }
   ]
