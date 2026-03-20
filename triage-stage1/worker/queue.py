@@ -4,10 +4,11 @@ from datetime import datetime
 import uuid
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.models import AiRun, AiRunStatus, AiRunTrigger, Ticket, TicketRequeueTrigger
-from shared.tickets import create_pending_ai_run
+from shared.tickets import ActiveAIRunExistsError, create_pending_ai_run
 
 
 def acquire_next_pending_run(session: Session) -> AiRun | None:
@@ -32,6 +33,22 @@ def _normalize_trigger(value: str | None) -> str:
     return AiRunTrigger.REQUESTER_REPLY.value
 
 
+def _active_run_query(ticket_id) -> sa.Select:
+    return sa.select(AiRun).where(
+        AiRun.ticket_id == ticket_id,
+        AiRun.status.in_([AiRunStatus.PENDING.value, AiRunStatus.RUNNING.value]),
+    )
+
+
+def _load_active_run(session: Session, *, ticket_id) -> AiRun | None:
+    return session.scalar(_active_run_query(ticket_id))
+
+
+def _is_active_run_integrity_error(exc: IntegrityError) -> bool:
+    message = str(getattr(exc, "orig", exc))
+    return "uq_ai_runs_ticket_active" in message or "ai_runs.ticket_id" in message
+
+
 def enqueue_deferred_requeue(
     session: Session,
     *,
@@ -43,23 +60,28 @@ def enqueue_deferred_requeue(
         return None
 
     session.flush()
-    active_run = session.scalar(
-        sa.select(AiRun).where(
-            AiRun.ticket_id == ticket.id,
-            AiRun.status.in_([AiRunStatus.PENDING.value, AiRunStatus.RUNNING.value]),
-        )
-    )
-    if active_run is not None:
+    run: AiRun | None = None
+    try:
+        with session.begin_nested():
+            run = create_pending_ai_run(
+                session,
+                ticket_id=ticket.id,
+                triggered_by=_normalize_trigger(ticket.requeue_trigger),
+                requested_by_user_id=requested_by_user_id,
+                created_at=created_at,
+            )
+            session.flush()
+    except ActiveAIRunExistsError:
+        run = None
+    except IntegrityError as exc:
+        if not _is_active_run_integrity_error(exc):
+            raise
+        run = None
+
+    active_run = run or _load_active_run(session, ticket_id=ticket.id)
+    if active_run is None:
         return None
 
-    run = create_pending_ai_run(
-        session,
-        ticket_id=ticket.id,
-        triggered_by=_normalize_trigger(ticket.requeue_trigger),
-        requested_by_user_id=requested_by_user_id,
-        created_at=created_at,
-    )
     ticket.requeue_requested = False
     ticket.requeue_trigger = None
     return run
-

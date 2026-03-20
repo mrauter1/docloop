@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 import uuid
 
+import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from shared.config import Settings, get_settings
@@ -156,6 +157,8 @@ def finish_prepared_run(
         ticket = session.get(Ticket, execution.ticket_id)
         if run is None or ticket is None:
             raise LookupError("Run or ticket disappeared while finishing worker execution")
+        if run.status != AiRunStatus.RUNNING.value:
+            return run.status
 
         if error_text is not None or payload is None:
             result = finalize_failure(
@@ -247,6 +250,61 @@ def finish_prepared_run(
         return result.run_status
 
 
+def reap_stuck_runs(
+    session_factory: sessionmaker[Session],
+    *,
+    settings: Settings,
+    max_age_seconds: int | None = None,
+    reaped_at: datetime | None = None,
+) -> int:
+    resolved_max_age = max_age_seconds or (settings.codex_timeout_seconds * 2)
+    resolved_reaped_at = reaped_at or now_utc()
+    cutoff = resolved_reaped_at - timedelta(seconds=resolved_max_age)
+    reaped_count = 0
+
+    with session_scope(session_factory) as session:
+        runs = session.scalars(
+            sa.select(AiRun)
+            .where(
+                AiRun.status == AiRunStatus.RUNNING.value,
+                AiRun.started_at.is_not(None),
+                AiRun.started_at < cutoff,
+            )
+            .order_by(AiRun.started_at.asc(), AiRun.id.asc())
+        ).all()
+
+        for run in runs:
+            ticket = session.get(Ticket, run.ticket_id)
+            if ticket is None or run.started_at is None:
+                continue
+
+            result = finalize_failure(
+                session,
+                ticket=ticket,
+                run=run,
+                error_text=(
+                    "Run stuck in running state for over "
+                    f"{resolved_max_age} seconds (started at {run.started_at.isoformat()}). "
+                    "Reaped by worker."
+                ),
+                completed_at=resolved_reaped_at,
+            )
+            if result.run_status != AiRunStatus.FAILED.value:
+                continue
+
+            reaped_count += 1
+            _log(
+                "ai_run_reaped",
+                run_id=run.id,
+                ticket_reference=ticket.reference,
+                queued_requeue_run_id=result.queued_requeue_run_id,
+                started_at=run.started_at.isoformat(),
+                max_age_seconds=resolved_max_age,
+            )
+
+    return reaped_count
+
+
 def process_next_run(
     session_factory: sessionmaker[Session],
     *,
@@ -297,6 +355,11 @@ def run_worker_loop(
             update_worker_heartbeat(resolved_session_factory, heartbeat_at=current)
             last_heartbeat_at = current
 
+        reap_stuck_runs(
+            resolved_session_factory,
+            settings=resolved_settings,
+            reaped_at=current,
+        )
         process_next_run(resolved_session_factory, settings=resolved_settings)
         if once:
             return

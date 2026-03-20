@@ -15,6 +15,7 @@ from shared.models import (
     AiDraftKind,
     AiDraftStatus,
     AiRun,
+    AiRunStatus,
     MessageAuthorType,
     MessageSource,
     MessageVisibility,
@@ -104,6 +105,17 @@ class TriageValidationError(ValueError):
 class PublicationResult:
     run_status: str
     queued_requeue_run_id: uuid.UUID | None
+
+
+def _resolved_publication_result(run: AiRun) -> PublicationResult:
+    return PublicationResult(run_status=run.status, queued_requeue_run_id=None)
+
+
+def _run_already_terminal(run: AiRun) -> bool:
+    return run.status not in {
+        AiRunStatus.PENDING.value,
+        AiRunStatus.RUNNING.value,
+    }
 
 
 def guard_auto_public_reply(
@@ -348,6 +360,9 @@ def finalize_success(
     publication_fingerprint: str,
     completed_at,
 ) -> PublicationResult:
+    if _run_already_terminal(run):
+        return _resolved_publication_result(run)
+
     guarded_output = guard_auto_public_reply(
         output,
         internal_body_texts=internal_body_texts,
@@ -377,6 +392,9 @@ def finalize_failure(
     error_text: str,
     completed_at,
 ) -> PublicationResult:
+    if _run_already_terminal(run):
+        return _resolved_publication_result(run)
+
     publish_failure_note(session, ticket=ticket, run=run, error_text=error_text, created_at=completed_at)
     change_ticket_status(
         session,
@@ -400,6 +418,9 @@ def finalize_superseded(
     run: AiRun,
     completed_at,
 ) -> PublicationResult:
+    if _run_already_terminal(run):
+        return _resolved_publication_result(run)
+
     run.status = "superseded"
     run.ended_at = completed_at
     session.flush()
@@ -414,6 +435,9 @@ def finalize_skipped(
     run: AiRun,
     completed_at,
 ) -> PublicationResult:
+    if _run_already_terminal(run):
+        return _resolved_publication_result(run)
+
     run.status = "skipped"
     run.ended_at = completed_at
     session.flush()
