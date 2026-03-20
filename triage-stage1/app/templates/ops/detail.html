@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+
+{% block title %}{{ ticket.reference }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="note">{{ ticket.reference }}</p>
+    <h1>{{ ticket.title }}</h1>
+    <div class="ticket-meta">
+      <span class="badge">{{ ticket.status.replace("_", " ").title() }}</span>
+      {% if ticket.urgent %}<span class="badge badge-urgent">Urgent</span>{% endif %}
+      {% if pending_draft %}<span class="badge">Draft pending approval</span>{% endif %}
+    </div>
+  </div>
+  <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai">
+    <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+    <button type="submit" class="button button-secondary">Rerun AI</button>
+  </form>
+</section>
+
+{% if error %}
+<p class="alert">{{ error }}</p>
+{% endif %}
+
+<section class="ops-layout">
+  <div class="ops-main">
+    <section class="panel wide">
+      <h2>Ticket header</h2>
+      <dl class="meta-grid">
+        <div><dt>Requester</dt><dd>{{ creator.display_name if creator else "Unknown" }}</dd></div>
+        <div><dt>Assignee</dt><dd>{{ assignee.display_name if assignee else "Unassigned" }}</dd></div>
+        <div><dt>Class</dt><dd>{{ ticket.ticket_class or "unknown" }}</dd></div>
+        <div><dt>Impact</dt><dd>{{ ticket.impact_level or "unknown" }}</dd></div>
+        <div><dt>Confidence</dt><dd>{{ ticket.ai_confidence if ticket.ai_confidence is not none else "n/a" }}</dd></div>
+        <div><dt>Development needed</dt><dd>{{ ticket.development_needed if ticket.development_needed is not none else "unknown" }}</dd></div>
+        <div><dt>Last AI action</dt><dd>{{ ticket.last_ai_action or "n/a" }}</dd></div>
+        <div><dt>Requester language</dt><dd>{{ ticket.requester_language or "n/a" }}</dd></div>
+      </dl>
+    </section>
+
+    <section class="panel wide">
+      <h2>Public thread</h2>
+      <div class="thread">
+        {% if public_thread %}
+          {% for message in public_thread %}
+          <article class="message-card">
+            <div class="message-head">
+              <strong>{{ message.author_label }}</strong>
+              <span class="note">{{ message.source_label }}</span>
+              <span class="timestamp">{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+            </div>
+            <div class="message-body">{{ message.body_html }}</div>
+            {% if message.attachments %}
+            <ul class="attachment-list">
+              {% for attachment in message.attachments %}
+              <li><a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a></li>
+              {% endfor %}
+            </ul>
+            {% endif %}
+          </article>
+          {% endfor %}
+        {% else %}
+        <p class="note">No public messages yet.</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="panel wide">
+      <h2>Internal thread</h2>
+      <div class="thread">
+        {% if internal_thread %}
+          {% for message in internal_thread %}
+          <article class="message-card">
+            <div class="message-head">
+              <strong>{{ message.author_label }}</strong>
+              <span class="note">{{ message.source_label }}</span>
+              <span class="timestamp">{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+            </div>
+            <div class="message-body">{{ message.body_html }}</div>
+          </article>
+          {% endfor %}
+        {% else %}
+        <p class="note">No internal notes yet.</p>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+
+  <aside class="ops-sidebar">
+    <section class="panel wide">
+      <h2>Assignment</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/assign" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+        <label>
+          <span>Assigned to</span>
+          <select name="assigned_to_user_id">
+            <option value="">Unassigned</option>
+            {% for user in ops_users %}
+            <option value="{{ user.id }}" {% if assignee and assignee.id == user.id %}selected{% endif %}>{{ user.display_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">Save assignment</button>
+      </form>
+    </section>
+
+    <section class="panel wide">
+      <h2>Status</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+        <label>
+          <span>Current state</span>
+          <select name="status">
+            {% for value, label in status_options %}
+            <option value="{{ value }}" {% if ticket.status == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">Update status</button>
+      </form>
+    </section>
+
+    <section class="panel wide">
+      <h2>AI analysis</h2>
+      {% if latest_ai_note_html %}
+      <div class="message-body">{{ latest_ai_note_html }}</div>
+      <p class="note">Generated {{ latest_ai_note_at.strftime("%Y-%m-%d %H:%M UTC") }}</p>
+      {% else %}
+      <p class="note">No internal AI summary has been recorded yet.</p>
+      {% endif %}
+      {% if latest_run %}
+      <p class="note">Latest run: {{ latest_run.status }}{% if latest_run.model_name %} via {{ latest_run.model_name }}{% endif %}</p>
+      {% endif %}
+    </section>
+
+    <section class="panel wide">
+      <h2>Relevant repo/docs paths</h2>
+      {% if relevant_paths %}
+      <ul class="path-list">
+        {% for item in relevant_paths %}
+        <li><code>{{ item.path }}</code> <span class="note">{{ item.reason }}</span></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="note">No relevant paths have been captured yet.</p>
+      {% endif %}
+    </section>
+
+    <section class="panel wide">
+      <h2>Public draft</h2>
+      {% if pending_draft %}
+      <div class="message-body">{{ pending_draft_html }}</div>
+      <div class="split-actions">
+        <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+          <label>
+            <span>Next status</span>
+            <select name="next_status">
+              {% for value, label in reply_status_options %}
+              <option value="{{ value }}" {% if selected_next_status == value %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button type="submit" class="button">Approve and publish</button>
+        </form>
+        <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject">
+          <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+          <button type="submit" class="button button-secondary">Reject</button>
+        </form>
+      </div>
+      {% elif latest_draft %}
+      <p class="note">Latest draft status: {{ latest_draft.status }}</p>
+      {% else %}
+      <p class="note">No AI draft is waiting for review.</p>
+      {% endif %}
+    </section>
+
+    <section class="panel wide">
+      <h2>Public reply</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+        <label>
+          <span>Message</span>
+          <textarea name="body" rows="6">{{ public_reply_body }}</textarea>
+        </label>
+        <label>
+          <span>Next status</span>
+          <select name="next_status">
+            {% for value, label in reply_status_options %}
+            <option value="{{ value }}" {% if selected_next_status == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">Send public reply</button>
+      </form>
+    </section>
+
+    <section class="panel wide">
+      <h2>Internal note</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/note-internal" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+        <label>
+          <span>Note</span>
+          <textarea name="body" rows="5">{{ internal_note_body }}</textarea>
+        </label>
+        <button type="submit" class="button button-secondary">Save internal note</button>
+      </form>
+    </section>
+  </aside>
+</section>
+{% endblock %}

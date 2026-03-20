@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}My Tickets{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>My tickets</h1>
+    <p class="note">Public thread view only. Internal analysis stays on the Dev/TI side.</p>
+  </div>
+  <a class="button" href="/app/tickets/new">New ticket</a>
+</section>
+
+<section class="panel">
+  {% if tickets %}
+  <ul class="ticket-list">
+    {% for ticket in tickets %}
+    <li class="ticket-row">
+      <div>
+        <a class="ticket-link" href="/app/tickets/{{ ticket.reference }}">{{ ticket.reference }}</a>
+        <div class="ticket-title">{{ ticket.title }}</div>
+      </div>
+      <div class="ticket-meta">
+        <span class="badge">{{ ticket.status }}</span>
+        {% if ticket.urgent %}<span class="badge badge-urgent">Urgent</span>{% endif %}
+        {% if ticket.updated %}<span class="badge badge-updated">Updated</span>{% endif %}
+        <span class="timestamp">{{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No tickets yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

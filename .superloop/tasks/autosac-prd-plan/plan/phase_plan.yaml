@@ -1,0 +1,218 @@
+version: 1
+task_id: autosac-prd-plan
+request_snapshot_ref: .superloop/tasks/autosac-prd-plan/runs/run-20260319T231229Z-10748079/request.md
+phases:
+  - phase_id: phase-1
+    title: Shared foundation and persistence
+    objective: Preserve the already-landed `triage-stage1/` foundation as the dependency base for every later slice and keep it aligned with the frozen PRD.
+    in_scope:
+      - Treat the existing `triage-stage1/` subproject, dependency manifest, and environment settings loader as the implementation baseline.
+      - Preserve the existing SQLAlchemy 2.x models and Alembic migration for all PRD tables, indexes, and allowed-value constraints.
+      - Preserve the shared helpers for ticket references, `updated_at`, status history, ticket view upserts, and draft superseding.
+      - Keep the one-active-run invariant enforced in both schema and shared persistence logic while later phases add route and worker code.
+    out_of_scope:
+      - FastAPI route handling and HTML templates.
+      - Session login/logout flows.
+      - Worker polling or Codex subprocess execution.
+    dependencies:
+      - PostgreSQL 16 reachable from WSL.
+      - "Deferred to phase-2: FastAPI route handling, auth pages, and session login/logout flows."
+      - "Deferred to phase-3: Dev/TI board and ticket-detail UI."
+      - "Deferred to phase-4: Worker polling and Codex subprocess execution."
+    acceptance_criteria:
+      - id: AC-P1-1
+        text: Alembic can create the full Stage 1 schema, including the partial unique index for active `ai_runs`.
+      - id: AC-P1-2
+        text: Shared helpers exist for status changes, ticket view updates, and draft superseding so later phases do not duplicate this logic.
+      - id: AC-P1-3
+        text: Environment settings cover all required PRD variables with documented defaults where specified.
+    deliverables:
+      - code
+      - migrations
+      - config
+      - tests
+    risks:
+      - Schema drift from the PRD will block every later phase.
+      - Missing central helpers will cause duplicated mutation logic and audit bugs.
+      - Coupling new web-app dependencies into the existing repository runtime would widen regression scope unnecessarily.
+    rollback:
+      - Revert to the last clean migration revision and regenerate the baseline schema before adding route or worker code.
+    status: planned
+  - phase_id: phase-2
+    title: Auth, requester flow, and attachment pipeline
+    objective: Fill the current placeholder auth/requester/upload surfaces so the existing Phase 1 foundation becomes a working requester-facing app slice.
+    in_scope:
+      - Implement `shared/security.py` and `shared/permissions.py` instead of leaving them as placeholders.
+      - Implement Argon2id password verification, opaque server-side sessions, remember-me expiry handling, and CSRF protection.
+      - Build `app/main.py`, auth routes, requester routes, templates, and forms for login, ticket list, ticket creation, ticket detail, reply, and resolve.
+      - Implement multipart parsing with explicit limits plus PNG/JPEG validation, Pillow inspection, SHA-256 hashing, and protected file serving in `app/uploads.py`.
+      - Implement ticket creation and requester reply transactions, including queue row creation or requeue flag updates.
+    out_of_scope:
+      - Dev/TI board and operator actions.
+      - Actual worker execution of queued AI runs.
+    dependencies:
+      - phase-1
+      - "Deferred to phase-3: Dev/TI board and operator actions."
+      - "Deferred to phase-4: Actual execution of queued AI runs."
+      - Phase-1 subproject isolation is preserved; do not expand the root package to host Stage 1 auth or upload dependencies.
+      - Validation for this phase must run from an environment that installs `triage-stage1/requirements.txt`, because the root repo environment does not include the Stage 1 web/database dependencies.
+    acceptance_criteria:
+      - id: AC-P2-1
+        text: Requesters can create, view, reply to, and resolve only their own tickets with optional title, urgent flag, and up to three images.
+      - id: AC-P2-2
+        text: The session cookie contains only an opaque token while session state, CSRF token, and expiry live in PostgreSQL.
+      - id: AC-P2-3
+        text: Attachment uploads and downloads enforce MIME, size, count, visibility, and ownership rules.
+    deliverables:
+      - code
+      - templates
+      - tests
+    risks:
+      - Falling back to signed-cookie session middleware would violate the PRD.
+      - Multipart defaults may diverge from the stated product limits if not set explicitly.
+    rollback:
+      - Disable login and requester POST routes until the custom session and upload pipeline pass integration tests.
+    status: planned
+  - phase_id: phase-3
+    title: Dev/TI workflow and human-controlled ticket actions
+    objective: Provide operator-facing board/detail workflows, internal/public message separation, assignment/status controls, and AI draft review actions.
+    in_scope:
+      - Implement `/ops`, `/ops/board`, and `/ops/tickets/{reference}` with grouped status columns and required filters.
+      - Implement Dev/TI public replies, internal notes, assignment changes, manual status changes, and manual rerun requests.
+      - Implement AI draft approval/publish and rejection flows.
+      - Render AI analysis, relevant paths, and internal/public threads in the ticket detail page while preserving requester isolation.
+    out_of_scope:
+      - Codex execution and automatic publication logic.
+      - Bootstrap scripts and workspace provisioning.
+    dependencies:
+      - phase-1
+      - phase-2
+      - "Deferred to phase-4: Codex execution and automatic AI publication logic."
+      - "Deferred to phase-5: Bootstrap scripts, workspace provisioning, and operability work."
+      - Maintain requester/internal visibility guarantees through shared transaction helpers instead of duplicating route logic.
+    acceptance_criteria:
+      - id: AC-P3-1
+        text: Dev/TI users can view all tickets, filter the board, and manage assignment, status, replies, and internal notes from the ops surface.
+      - id: AC-P3-2
+        text: Draft approval and rejection flows create the correct public message or status transition without exposing internal content to requesters.
+      - id: AC-P3-3
+        text: Ticket view timestamps update only on allowed detail GET and mutation POST paths.
+    deliverables:
+      - code
+      - templates
+      - tests
+    risks:
+      - UI paths may bypass shared audit/update helpers unless those helpers are reused consistently.
+      - Internal/public thread separation is easy to regress in templates.
+    rollback:
+      - Keep `/ops` behind role checks and withhold draft actions until requester-isolation and visibility tests pass.
+    status: planned
+  - phase_id: phase-4
+    title: Worker queue, Codex orchestration, and publication safety
+    objective: Execute pending AI runs safely with read-only Codex triage, exact workspace artifacts, fingerprint-based suppression, and rule-driven action publication.
+    in_scope:
+      - Implement worker polling, oldest-pending acquisition, `FOR UPDATE SKIP LOCKED`, and active-run lifecycle transitions.
+      - Compute automatic-trigger and publication fingerprints exactly per PRD rules and apply skip, superseded, and deferred requeue behavior.
+      - Write run artifacts, exact `AGENTS.md`, exact repo skill `SKILL.md`, exact schema, and exact prompt skeleton into the workspace/run directories.
+      - Invoke Codex with read-only sandboxing, no approvals, disabled web search, JSON output, and canonical final-message parsing.
+      - Publish exactly one internal AI note per successful non-superseded run and then apply one allowed action path.
+      - Handle failure paths with internal failure notes and `waiting_on_dev_ti`.
+    out_of_scope:
+      - Admin/bootstrap CLI polish beyond what the worker itself needs to run.
+      - New product features outside the five allowed worker action paths.
+    dependencies:
+      - phase-1
+      - phase-2
+      - phase-3
+      - CODEX_API_KEY and configured Codex binary available.
+      - Read-only `app/` and `manuals/` mounts available at configured workspace paths.
+      - "Deferred to phase-5: Bootstrap, health/readiness polish, and management-command operability work."
+      - Reuse the exact workspace artifact texts and shared ticket mutation helpers defined in earlier phases.
+    acceptance_criteria:
+      - id: AC-P4-1
+        text: The worker enforces one active run per ticket, stale-run suppression, and deferred requeue behavior exactly as described in the PRD.
+      - id: AC-P4-2
+        text: Every successful non-superseded run updates classification fields, emits exactly one internal AI note, and applies exactly one action path.
+      - id: AC-P4-3
+        text: Automatic public replies never disclose facts present only in internal messages.
+    deliverables:
+      - code
+      - workspace-templates
+      - tests
+    risks:
+      - Publication-time race conditions can leak stale or duplicate AI output.
+      - Workspace artifact drift can make Codex behavior diverge from the approved PRD contract.
+    rollback:
+      - Disable worker publication and leave runs in `waiting_on_dev_ti` while retaining internal failure notes if safety checks fail.
+    status: planned
+  - phase_id: phase-5
+    title: Bootstrap, operability, and management commands
+    objective: Make the system deployable in WSL with the mandated workspace layout, health checks, heartbeat, structured logs, and CLI administration.
+    in_scope:
+      - Implement workspace bootstrap, git initialization, empty initial commit creation, mount verification, and exact `AGENTS.md` and skill file writes.
+      - Implement admin/user/password/deactivation CLI commands.
+      - Implement `run_web.py`, `run_worker.py`, `/healthz`, `/readyz`, structured JSON logging, and worker heartbeat updates.
+      - Document required environment variables and recommended defaults.
+    out_of_scope:
+      - Additional notification systems, SSO, or web-based admin UI.
+      - Product behavior outside the Stage 1 deployment contract.
+    dependencies:
+      - phase-1
+      - phase-2
+      - phase-4
+      - "Deferred beyond Stage 1 scope: external notifications, SSO, and web admin remain excluded."
+      - Preserve the `triage-stage1/` isolation boundary unless an explicit follow-up task requests tighter repo integration.
+    acceptance_criteria:
+      - id: AC-P5-1
+        text: Bootstrap creates or validates the workspace, git repo, mounts, exact agent artifacts, and upload directory without manual file edits.
+      - id: AC-P5-2
+        text: CLI management commands support admin creation, user creation, password reset, and deactivation.
+      - id: AC-P5-3
+        text: Health/readiness and heartbeat behavior expose process, DB, and workspace readiness cleanly for operations.
+    deliverables:
+      - code
+      - scripts
+      - docs
+      - tests
+    risks:
+      - The system may work in development but fail to bootstrap reproducibly in the intended WSL topology.
+      - Missing heartbeat/readiness coverage can hide worker or workspace failures.
+    rollback:
+      - Keep deployment limited to manual local execution until bootstrap and readiness checks pass end to end.
+    status: planned
+  - phase_id: phase-6
+    title: Acceptance hardening and regression coverage
+    objective: Close remaining gaps against AC1-AC19 with focused automated coverage, documentation, and manual acceptance verification.
+    in_scope:
+      - Add route, worker, helper, and CLI tests for the highest-risk invariants and edge cases.
+      - Map AC1-AC19 to concrete code paths and test coverage.
+      - Complete operator setup documentation and a concise manual verification checklist.
+      - Fix cross-phase defects discovered during the acceptance sweep without expanding Stage 1 scope.
+    out_of_scope:
+      - New roadmap items outside the frozen PRD.
+      - Performance optimization beyond correctness and operability needs.
+    dependencies:
+      - phase-1
+      - phase-2
+      - phase-3
+      - phase-4
+      - phase-5
+      - "Deferred beyond Stage 1 scope: roadmap items outside the frozen PRD and non-essential performance tuning."
+    acceptance_criteria:
+      - id: AC-P6-1
+        text: All PRD acceptance criteria are traceable to implemented code and automated or manual verification steps.
+      - id: AC-P6-2
+        text: Regression tests cover session behavior, requester isolation, upload limits, unread tracking, AI queue invariants, draft flows, and non-leak safeguards.
+      - id: AC-P6-3
+        text: Final documentation is sufficient for a clean bootstrap and local run of the web app and worker.
+    deliverables:
+      - tests
+      - docs
+      - fixes
+    risks:
+      - Cross-phase gaps may remain hidden without an explicit AC-by-AC sweep.
+      - Late fixes can accidentally broaden scope unless constrained to acceptance gaps.
+      - Final hardening can accidentally leak changes into the existing repository root if the Stage 1 isolation boundary is not respected.
+    rollback:
+      - Freeze new feature work and limit changes to acceptance-gap fixes until the sweep passes.
+    status: planned
