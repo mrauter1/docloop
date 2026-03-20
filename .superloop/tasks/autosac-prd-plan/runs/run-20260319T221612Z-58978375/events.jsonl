@@ -1,0 +1,5 @@
+{"ts": "2026-03-19T22:16:12.897972+00:00", "run_id": "run-20260319T221612Z-58978375", "seq": 1, "event_type": "run_started", "workspace": "/workspace/docloop", "pairs": ["implement", "test"], "max_iterations": 15, "use_git": true, "task_id": "autosac-prd-plan", "task_root": ".superloop/tasks/autosac-prd-plan"}
+{"ts": "2026-03-19T22:16:12.941623+00:00", "run_id": "run-20260319T221612Z-58978375", "seq": 2, "event_type": "phase_scope_resolved", "phase_mode": "single", "phase_ids": ["phase-1"], "explicit": true, "current_phase_index": 0}
+{"ts": "2026-03-19T22:16:12.946910+00:00", "run_id": "run-20260319T221612Z-58978375", "seq": 3, "event_type": "phase_started", "phase_id": "phase-1", "phase_mode": "single"}
+{"ts": "2026-03-19T22:16:12.948542+00:00", "run_id": "run-20260319T221612Z-58978375", "seq": 4, "event_type": "pair_started", "pair": "implement", "phase_id": "phase-1"}
+{"ts": "2026-03-19T22:16:12.948926+00:00", "run_id": "run-20260319T221612Z-58978375", "seq": 5, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1, "phase_id": "phase-1"}

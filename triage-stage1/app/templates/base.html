@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Stage 1 Triage{% endblock %}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div>
+        <a class="brand" href="{% if current_user and current_user.role != 'requester' %}/ops{% else %}/app{% endif %}">Stage 1 Triage</a>
+      </div>
+      {% if current_user %}
+      <div class="header-actions">
+        <nav class="header-nav">
+          {% if current_user.role == "requester" %}
+          <a href="/app/tickets">My tickets</a>
+          <a href="/app/tickets/new">New ticket</a>
+          {% else %}
+          <a href="/ops/board">Ops board</a>
+          {% endif %}
+        </nav>
+        <span class="user-chip">{{ current_user.display_name }}</span>
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+          <button type="submit" class="button button-secondary">Log out</button>
+        </form>
+      </div>
+      {% endif %}
+    </header>
+    <main class="page-shell">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

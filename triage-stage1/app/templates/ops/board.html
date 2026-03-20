@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block title %}Ops Board{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="note">Dev/TI queue</p>
+    <h1>Ops board</h1>
+  </div>
+</section>
+
+<section class="panel wide">
+  <form method="get" action="/ops/board" class="filter-grid">
+    <label>
+      <span>Status</span>
+      <select name="status">
+        <option value="">All statuses</option>
+        {% for column in columns %}
+        <option value="{{ column.status }}" {% if filters.status == column.status %}selected{% endif %}>{{ column.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Class</span>
+      <select name="ticket_class">
+        <option value="">All classes</option>
+        {% for item in ticket_class_options %}
+        <option value="{{ item }}" {% if filters.ticket_class == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Assigned to</span>
+      <select name="assigned_to">
+        <option value="">Anyone</option>
+        {% for user in assignee_options %}
+        <option value="{{ user.id }}" {% if filters.assigned_to == (user.id|string) %}selected{% endif %}>{{ user.display_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="urgent" value="1" {% if filters.urgent %}checked{% endif %}>
+      <span>Urgent only</span>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="unassigned_only" value="1" {% if filters.unassigned_only %}checked{% endif %}>
+      <span>Unassigned only</span>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="created_by_me" value="1" {% if filters.created_by_me %}checked{% endif %}>
+      <span>Created by me</span>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="needs_approval" value="1" {% if filters.needs_approval %}checked{% endif %}>
+      <span>Needs approval</span>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="updated_since_my_last_view" value="1" {% if filters.updated_since_my_last_view %}checked{% endif %}>
+      <span>Updated since my last view</span>
+    </label>
+    <div class="form-actions">
+      <button type="submit" class="button">Apply filters</button>
+      <a href="/ops/board" class="button button-secondary">Clear</a>
+    </div>
+  </form>
+</section>
+
+<section class="ops-board">
+  {% for column in columns %}
+  <section class="panel board-column">
+    <div class="board-column-head">
+      <h2>{{ column.label }}</h2>
+      <span class="badge">{{ column.tickets|length }}</span>
+    </div>
+    <div class="board-cards">
+      {% if column.tickets %}
+        {% for ticket in column.tickets %}
+        <article class="board-card">
+          <div class="ticket-meta">
+            <span class="note">{{ ticket.reference }}</span>
+            {% if ticket.updated %}<span class="badge badge-updated">Updated</span>{% endif %}
+          </div>
+          <h3><a href="/ops/tickets/{{ ticket.reference }}">{{ ticket.title }}</a></h3>
+          <p class="note">Created by {{ ticket.creator_name }}</p>
+          <div class="ticket-meta">
+            <span class="badge">{{ ticket.ticket_class }}</span>
+            {% if ticket.urgent %}<span class="badge badge-urgent">Urgent</span>{% endif %}
+            {% if ticket.needs_approval %}<span class="badge">Needs approval</span>{% endif %}
+          </div>
+          <p class="note">
+            {% if ticket.assignee_name %}Assigned to {{ ticket.assignee_name }}{% else %}Unassigned{% endif %}
+          </p>
+          <p class="note">Updated {{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</p>
+        </article>
+        {% endfor %}
+      {% else %}
+      <p class="note">No tickets match this column.</p>
+      {% endif %}
+    </div>
+  </section>
+  {% endfor %}
+</section>
+{% endblock %}

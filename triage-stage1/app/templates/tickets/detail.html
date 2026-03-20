@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}{{ ticket.reference }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="note">{{ ticket.reference }}</p>
+    <h1>{{ ticket.title }}</h1>
+    <div class="ticket-meta">
+      <span class="badge">{{ requester_status }}</span>
+      {% if ticket.urgent %}<span class="badge badge-urgent">Urgent</span>{% endif %}
+    </div>
+  </div>
+  {% if ticket.status != "resolved" %}
+  <form method="post" action="/app/tickets/{{ ticket.reference }}/resolve">
+    <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+    <button type="submit" class="button button-secondary">Mark resolved</button>
+  </form>
+  {% endif %}
+</section>
+
+{% if error %}
+<p class="alert">{{ error }}</p>
+{% endif %}
+
+<section class="thread">
+  {% for message in thread %}
+  <article class="panel message-card">
+    <div class="message-head">
+      <strong>{{ message.author_label }}</strong>
+      <span class="timestamp">{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+    </div>
+    <div class="message-body">{{ message.body_html }}</div>
+    {% if message.attachments %}
+    <ul class="attachment-list">
+      {% for attachment in message.attachments %}
+      <li>
+        <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
+        <span class="note">({{ attachment.mime_type }}, {{ attachment.size_bytes }} bytes)</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </article>
+  {% endfor %}
+</section>
+
+<section class="panel wide">
+  <h2>Reply</h2>
+  <form method="post" action="/app/tickets/{{ ticket.reference }}/reply" enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ session_csrf_token }}">
+    <label>
+      <span>Message</span>
+      <textarea name="body" rows="6">{{ reply_body }}</textarea>
+    </label>
+    <label>
+      <span>Images</span>
+      <input type="file" name="attachments" accept="image/png,image/jpeg" multiple>
+    </label>
+    <button type="submit" class="button">Send reply</button>
+  </form>
+</section>
+{% endblock %}

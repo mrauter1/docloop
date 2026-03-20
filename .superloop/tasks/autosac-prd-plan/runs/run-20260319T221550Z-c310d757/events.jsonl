@@ -1,0 +1,2 @@
+{"ts": "2026-03-19T22:15:51.059601+00:00", "run_id": "run-20260319T221550Z-c310d757", "seq": 1, "event_type": "run_started", "workspace": "/workspace/docloop", "pairs": ["implement", "test"], "max_iterations": 15, "use_git": true, "task_id": "autosac-prd-plan", "task_root": ".superloop/tasks/autosac-prd-plan"}
+{"ts": "2026-03-19T22:15:51.109518+00:00", "run_id": "run-20260319T221550Z-c310d757", "seq": 2, "event_type": "run_finished", "status": "fatal_error", "exit_code": 1}

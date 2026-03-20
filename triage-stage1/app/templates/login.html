@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Login{% endblock %}
+
+{% block content %}
+<section class="panel narrow">
+  <h1>Sign in</h1>
+  {% if error %}
+  <p class="alert">{{ error }}</p>
+  {% endif %}
+
+  {% if current_user and current_user.role != "requester" %}
+  <p>Signed in as <strong>{{ current_user.display_name }}</strong>.</p>
+  <p>The Dev/TI surface is deferred to Phase 3, so only the requester flow is available in this phase.</p>
+  {% elif not current_user %}
+  <form method="post" action="/login" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      <span>Email</span>
+      <input type="email" name="email" autocomplete="username" required>
+    </label>
+    <label>
+      <span>Password</span>
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="remember_me">
+      <span>Remember me</span>
+    </label>
+    <button type="submit" class="button">Log in</button>
+  </form>
+  {% endif %}
+
+  {% if ops_pending %}
+  <p class="note">Login succeeded, but the Dev/TI UI is intentionally deferred to Phase 3.</p>
+  {% endif %}
+</section>
+{% endblock %}
