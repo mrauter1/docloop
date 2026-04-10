@@ -8,9 +8,12 @@ Requires: 'git' and 'codex' CLI installed and available in your PATH.
 """
 
 import argparse
+import codecs
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -277,6 +280,12 @@ class RunMode:
     verifier_prompt_file: Path
     criteria_file: Path
 
+
+HEARTBEAT_SILENCE_SECONDS = 5.0
+HEARTBEAT_TICK_SECONDS = 1.0
+HEARTBEAT_LOG_INTERVAL_SECONDS = 10.0
+HEARTBEAT_FRAMES = (".", "..", "...")
+
 def fatal(message: str, exit_code: int = 1):
     """Prints a fatal error and exits immediately."""
     print(message, file=sys.stderr)
@@ -393,23 +402,35 @@ def resolve_codex_exec_command(model: str) -> List[str]:
 
     help_text = f"{help_result.stdout}\n{help_result.stderr}"
 
-    missing_flags = [flag for flag in ("--full-auto", "--dangerously-bypass-approvals-and-sandbox") if flag not in help_text]
-    if missing_flags:
-        fatal(
-            "[!] FATAL CODEX ERROR: This Doc-Loop version requires `codex exec` support for: "
-            + ", ".join(missing_flags)
-        )
+    supports_bypass = "--dangerously-bypass-approvals-and-sandbox" in help_text
+    supports_full_auto = "--full-auto" in help_text
 
-    return [
-        "codex",
-        "exec",
-        "--ephemeral",
-        "--full-auto",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--model",
-        model,
-        "-",
-    ]
+    if supports_full_auto:
+        return [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--full-auto",
+            "--model",
+            model,
+            "-",
+        ]
+
+    if supports_bypass:
+        return [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--model",
+            model,
+            "-",
+        ]
+
+    fatal(
+        "[!] FATAL CODEX ERROR: This Doc-Loop version requires `codex exec` support for "
+        "either --dangerously-bypass-approvals-and-sandbox or --full-auto."
+    )
 
 def resolve_output_target(doc_type: str, output_arg: Optional[str]) -> Path:
     """Resolves the target document path from the CLI output flag."""
@@ -587,30 +608,185 @@ def ask_human(question_text: str) -> str:
             print("\n[!] EOF detected. Exiting.")
             sys.exit(130)
 
-def run_codex_phase(codex_command: List[str], workspace: Workspace, prompt_path: Path, phase_name: str) -> str:
-    """Runs one Codex phase and returns captured stdout for tag parsing."""
+def _read_pipe_chunks(pipe, stream_name: str, event_queue: queue.Queue):
+    """Reads raw bytes from a child pipe and forwards them to the main loop."""
+    try:
+        while True:
+            chunk = pipe.read(4096)
+            if not chunk:
+                break
+            event_queue.put((stream_name, chunk))
+    finally:
+        pipe.close()
+        event_queue.put((stream_name, None))
+
+
+def _clear_tty_status_line(rendered_width: int):
+    """Clears the inline heartbeat line in an interactive terminal."""
+    if rendered_width <= 0:
+        return
+    sys.stderr.write("\r" + (" " * rendered_width) + "\r")
+    sys.stderr.flush()
+
+
+def _terminate_process(process: subprocess.Popen):
+    """Stops a child process if it is still running."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        process.wait()
+
+
+def run_codex_phase(
+    codex_command: List[str],
+    workspace: Workspace,
+    prompt_path: Path,
+    phase_name: str,
+    stream_codex_output: bool = False,
+) -> str:
+    """Runs one Codex phase, emits silence heartbeats, and captures stdout for loop control."""
     base_instructions = prompt_path.read_text(encoding='utf-8')
     prompt_payload = f"TARGET DOCUMENT: {workspace.target_doc.name}\n\n{base_instructions}"
 
-    print(f"[*] Spawning {phase_name} agent... (Streaming progress below)")
+    if stream_codex_output:
+        print(f"[*] Spawning {phase_name} agent... (Streaming Codex stdout below)", flush=True)
+    else:
+        print(f"[*] Spawning {phase_name} agent...", flush=True)
 
-    process = subprocess.run(
+    process = subprocess.Popen(
         codex_command,
         cwd=workspace.root,
-        input=prompt_payload,
-        text=True,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=sys.stderr,
-        encoding='utf-8'
+        stderr=subprocess.PIPE,
     )
 
-    stdout = process.stdout or ""
-    if process.returncode != 0:
-        if stdout.strip():
-            print(stdout.rstrip(), file=sys.stderr)
-        fatal(f"\n[!] Codex CLI failed during {phase_name} phase with exit code {process.returncode}. Aborting.")
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        _terminate_process(process)
+        fatal(f"[!] Unable to start Codex {phase_name} phase with pipe access.")
 
-    return stdout
+    event_queue: queue.Queue = queue.Queue()
+    reader_threads = [
+        threading.Thread(
+            target=_read_pipe_chunks,
+            args=(process.stdout, "stdout", event_queue),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_read_pipe_chunks,
+            args=(process.stderr, "stderr", event_queue),
+            daemon=True,
+        ),
+    ]
+    for thread in reader_threads:
+        thread.start()
+
+    stdout_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    stderr_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    stdout_chunks: List[str] = []
+    open_streams = {"stdout", "stderr"}
+    phase_start = time.monotonic()
+    last_activity = phase_start
+    next_non_tty_heartbeat_at = phase_start + HEARTBEAT_SILENCE_SECONDS
+    heartbeat_width = 0
+    stderr_is_tty = sys.stderr.isatty()
+
+    try:
+        try:
+            process.stdin.write(prompt_payload.encode("utf-8"))
+            process.stdin.flush()
+        except BrokenPipeError:
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+        while open_streams:
+            try:
+                stream_name, chunk = event_queue.get(timeout=HEARTBEAT_TICK_SECONDS)
+            except queue.Empty:
+                now = time.monotonic()
+                if now - last_activity < HEARTBEAT_SILENCE_SECONDS:
+                    continue
+
+                elapsed_seconds = max(1, int(now - phase_start))
+                if stderr_is_tty:
+                    silent_ticks = max(0, int(now - last_activity - HEARTBEAT_SILENCE_SECONDS))
+                    frame = HEARTBEAT_FRAMES[silent_ticks % len(HEARTBEAT_FRAMES)]
+                    message = f"[*] {phase_name} still running{frame} {elapsed_seconds}s"
+                    padded_message = message.ljust(heartbeat_width)
+                    sys.stderr.write("\r" + padded_message)
+                    sys.stderr.flush()
+                    heartbeat_width = len(padded_message)
+                elif now >= next_non_tty_heartbeat_at:
+                    print(f"[*] {phase_name} still running... {elapsed_seconds}s", file=sys.stderr)
+                    next_non_tty_heartbeat_at = now + HEARTBEAT_LOG_INTERVAL_SECONDS
+                continue
+
+            if chunk is None:
+                open_streams.discard(stream_name)
+                continue
+
+            last_activity = time.monotonic()
+            next_non_tty_heartbeat_at = last_activity + HEARTBEAT_SILENCE_SECONDS
+            if stderr_is_tty and heartbeat_width:
+                _clear_tty_status_line(heartbeat_width)
+                heartbeat_width = 0
+
+            decoder = stdout_decoder if stream_name == "stdout" else stderr_decoder
+            text = decoder.decode(chunk)
+            if not text:
+                continue
+
+            if stream_name == "stdout":
+                stdout_chunks.append(text)
+                if stream_codex_output:
+                    print(text, end="", file=sys.stderr, flush=True)
+            else:
+                print(text, end="", file=sys.stderr, flush=True)
+
+        if stderr_is_tty and heartbeat_width:
+            _clear_tty_status_line(heartbeat_width)
+            heartbeat_width = 0
+
+        stdout_tail = stdout_decoder.decode(b"", final=True)
+        if stdout_tail:
+            stdout_chunks.append(stdout_tail)
+            if stream_codex_output:
+                print(stdout_tail, end="", file=sys.stderr, flush=True)
+
+        stderr_tail = stderr_decoder.decode(b"", final=True)
+        if stderr_tail:
+            print(stderr_tail, end="", file=sys.stderr, flush=True)
+
+        returncode = process.wait()
+        stdout = "".join(stdout_chunks)
+        if returncode != 0:
+            if stdout.strip() and not stream_codex_output:
+                print(stdout.rstrip(), file=sys.stderr)
+            fatal(f"\n[!] Codex CLI failed during {phase_name} phase with exit code {returncode}. Aborting.")
+
+        return stdout
+    except BaseException:
+        if stderr_is_tty and heartbeat_width:
+            _clear_tty_status_line(heartbeat_width)
+        _terminate_process(process)
+        raise
+    finally:
+        for thread in reader_threads:
+            thread.join()
 
 @dataclass(frozen=True)
 class PhaseControlDecision:
@@ -686,6 +862,11 @@ def main():
     parser.add_argument("--type", choices=["SAD", "PRD"], default="SAD", help="Target document type")
     parser.add_argument("--max-iterations", type=int, default=15, help="Maximum number of non-question agent loops")
     parser.add_argument("--model", type=str, default="gpt-5.4", help="Codex model to use")
+    parser.add_argument(
+        "--stream-codex-output",
+        action="store_true",
+        help="Mirror nested Codex stdout to stderr while still capturing it for loop-control parsing",
+    )
     parser.add_argument("--update", action="store_true", help="Update an existing target document using explicit change instructions")
     parser.add_argument("--update-text", type=str, help="Requested document updates to apply when --update is set")
     parser.add_argument("--no-git", action="store_true", help="Do not initialize git or create git commits/checkpoints")
@@ -733,7 +914,13 @@ def main():
             if use_git:
                 commit_tracked_changes(workspace, f"docloop: pre-cycle {cycle_number} snapshot")
 
-            writer_stdout = run_codex_phase(codex_command, workspace, run_mode.writer_prompt_file, "writer")
+            writer_stdout = run_codex_phase(
+                codex_command,
+                workspace,
+                run_mode.writer_prompt_file,
+                "writer",
+                stream_codex_output=args.stream_codex_output,
+            )
             writer_control = parse_phase_control(writer_stdout, "writer")
             writer_decision = decide_writer_control(writer_control)
 
@@ -769,7 +956,8 @@ def main():
                 codex_command,
                 workspace,
                 run_mode.verifier_prompt_file,
-                "verifier"
+                "verifier",
+                stream_codex_output=args.stream_codex_output,
             )
             verifier_control = parse_phase_control(verifier_stdout, "verifier")
             verifier_decision = decide_verifier_control(
