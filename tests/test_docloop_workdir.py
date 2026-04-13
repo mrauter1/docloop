@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
 
+import docloop
 import pytest
 
 from docloop import (
@@ -15,6 +18,12 @@ from docloop import (
     resolve_grounding_workdir,
     select_run_mode,
 )
+
+
+def _init_git_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "DocLoop Tests"], cwd=root, check=True)
 
 
 def test_resolve_grounding_workdir_rejects_missing_directory(tmp_path: Path):
@@ -193,6 +202,56 @@ def test_assert_grounding_unchanged_rejects_unmanaged_changes(tmp_path: Path):
 
     with pytest.raises(SystemExit):
         assert_grounding_unchanged(before, workspace, "writer")
+
+
+def test_assert_grounding_unchanged_rejects_ignored_git_file_changes(tmp_path: Path):
+    grounding_workdir = tmp_path / "service"
+    artifact_root = tmp_path / "plans"
+    grounding_workdir.mkdir()
+    _init_git_repo(grounding_workdir)
+    (grounding_workdir / ".gitignore").write_text(".env\n", encoding="utf-8")
+    (grounding_workdir / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=grounding_workdir, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=grounding_workdir, check=True)
+    (grounding_workdir / ".env").write_text("SECRET=before\n", encoding="utf-8")
+
+    workspace = build_workspace(
+        artifact_root / "PRD.md",
+        grounding_workdir=grounding_workdir,
+        exec_cwd=grounding_workdir,
+    )
+
+    before = capture_grounding_snapshot(workspace)
+    ignored_entries = [entry for entry in before[2] if entry.startswith("!! .env\t")]
+    assert len(ignored_entries) == 1
+
+    (grounding_workdir / ".env").write_text("SECRET=after\n", encoding="utf-8")
+
+    after = capture_grounding_snapshot(workspace)
+    assert after != before
+
+    with pytest.raises(SystemExit):
+        assert_grounding_unchanged(before, workspace, "writer")
+
+
+def test_capture_grounding_snapshot_falls_back_to_fs_when_git_is_unavailable(tmp_path: Path):
+    grounding_workdir = tmp_path / "service"
+    artifact_root = tmp_path / "plans"
+    grounding_workdir.mkdir()
+    code_file = grounding_workdir / "code.py"
+    code_file.write_text("print('hello')\n", encoding="utf-8")
+    workspace = build_workspace(
+        artifact_root / "PRD.md",
+        grounding_workdir=grounding_workdir,
+        exec_cwd=grounding_workdir,
+    )
+
+    with mock.patch.object(docloop.subprocess, "run", side_effect=FileNotFoundError("git")):
+        snapshot = capture_grounding_snapshot(workspace)
+
+    assert snapshot[0] == "fs"
+    assert snapshot[1] == str(grounding_workdir.resolve())
+    assert any(entry.startswith("code.py\t") for entry in snapshot[2])
 
 
 def test_greenfield_workspace_can_use_temporary_exec_cwd(tmp_path: Path):

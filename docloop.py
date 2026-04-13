@@ -944,13 +944,16 @@ def build_prompt_payload(workspace: Workspace, prompt_path: Path) -> str:
 
 def resolve_repo_root(path: Path) -> Path | None:
     """Returns the enclosing git repo root for the provided path, if any."""
-    probe = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except FileNotFoundError:
+        return None
     if probe.returncode != 0:
         return None
     return Path(probe.stdout.strip()).resolve()
@@ -969,12 +972,19 @@ def _allowed_relative_paths(root: Path, workspace: Workspace) -> Set[str]:
         allowed.add(relative.as_posix().rstrip("/"))
     return allowed
 
-def _filtered_git_status_lines(repo_root: Path, *, allowed_roots: Set[str]) -> tuple[str, ...]:
+def _snapshot_path_entry(path_text: str, file_path: Path, *, prefix: str = "") -> str:
+    try:
+        stat_result = file_path.lstat()
+    except FileNotFoundError:
+        return f"{prefix}{path_text}\tmissing"
+    return f"{prefix}{path_text}\t{stat_result.st_mode}\t{stat_result.st_size}\t{stat_result.st_mtime_ns}"
+
+def _snapshot_git_worktree(repo_root: Path, *, allowed_roots: Set[str]) -> tuple[str, ...]:
     status_output = git_stdout(
         ["status", "--porcelain", "--untracked-files=all"],
         cwd=repo_root,
     )
-    filtered: list[str] = []
+    snapshot_entries: list[str] = []
     for line in status_output.splitlines():
         if len(line) < 4:
             continue
@@ -982,8 +992,19 @@ def _filtered_git_status_lines(repo_root: Path, *, allowed_roots: Set[str]) -> t
         rename_parts = [part.strip() for part in path_text.split(" -> ")]
         if all(_path_within_allowed(part, allowed_roots) for part in rename_parts):
             continue
-        filtered.append(line)
-    return tuple(filtered)
+        snapshot_entries.append(line)
+
+    ignored_output = run_git(
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        cwd=repo_root,
+    ).stdout
+    for ignored_path in ignored_output.split("\0"):
+        if not ignored_path or _path_within_allowed(ignored_path, allowed_roots):
+            continue
+        snapshot_entries.append(
+            _snapshot_path_entry(ignored_path, repo_root / ignored_path, prefix="!! ")
+        )
+    return tuple(sorted(snapshot_entries))
 
 def _snapshot_filesystem_tree(root: Path, *, allowed_roots: Set[str]) -> tuple[str, ...]:
     entries: list[str] = []
@@ -1013,10 +1034,7 @@ def _snapshot_filesystem_tree(root: Path, *, allowed_roots: Set[str]) -> tuple[s
             if _path_within_allowed(relative_path, allowed_roots):
                 continue
             file_path = current_dir / filename
-            stat_result = file_path.lstat()
-            entries.append(
-                f"{relative_path}\t{stat_result.st_mode}\t{stat_result.st_size}\t{stat_result.st_mtime_ns}"
-            )
+            entries.append(_snapshot_path_entry(relative_path, file_path))
     return tuple(sorted(entries))
 
 def capture_grounding_snapshot(workspace: Workspace) -> tuple[str, str, tuple[str, ...]]:
@@ -1027,7 +1045,7 @@ def capture_grounding_snapshot(workspace: Workspace) -> tuple[str, str, tuple[st
     repo_root = resolve_repo_root(workspace.grounding_workdir)
     if repo_root is not None:
         allowed = _allowed_relative_paths(repo_root, workspace)
-        return ("git", str(repo_root), _filtered_git_status_lines(repo_root, allowed_roots=allowed))
+        return ("git", str(repo_root), _snapshot_git_worktree(repo_root, allowed_roots=allowed))
 
     allowed = _allowed_relative_paths(workspace.grounding_workdir, workspace)
     return (
