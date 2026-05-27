@@ -6,6 +6,9 @@
 
 - Checks that `git` and `codex` are available in `PATH`.
 - Resolves an output target file, defaulting to `./SAD.md` or `./PRD.md` in the current directory.
+- Resolves an optional read-only grounding `--workdir` so plans can be grounded against an existing project without forcing the output document to live there.
+- Supports explicit greenfield mode with `--no-workdir` when no implementation exists yet.
+- Prompts interactively when neither `--workdir` nor `--no-workdir` is supplied, so the user must choose between current-directory grounding and greenfield mode.
 - Creates a `.docloop/` workspace with writer prompt, verifier prompt, criteria, progress, and context files next to the output target.
 - Seeds the target markdown document from `--input-text` or `--input-file` when provided.
 - Supports `--update` mode with `--update-text`, a frozen baseline snapshot, and dedicated writer/verifier prompts for change requests.
@@ -54,6 +57,8 @@ Options:
 - `--update-text TEXT`: Requested document updates to apply when `--update` is set
 - `--input-text TEXT`: Seed the output document from inline text
 - `--input-file PATH`: Seed the output document from a file
+- `--workdir PATH`: Read-only grounding directory for an existing project implementation
+- `--no-workdir`: Treat the run as a new or greenfield project with no implementation workdir
 - `-o`, `-output`, `--output`: Output file or directory. Default: `./SAD.md` or `./PRD.md`
 
 Example:
@@ -68,6 +73,14 @@ python3 docloop.py --type PRD --input-text "# Draft PRD" --output ./prd-review.m
 
 ```bash
 python3 docloop.py --update --update-text "Add offline deployment constraints and clarify backward compatibility." --output ./SAD.md
+```
+
+```bash
+python3 docloop.py --type PRD --workdir ../service-repo --output ./plans/service-refactor-prd.md
+```
+
+```bash
+python3 docloop.py --type PRD --no-workdir --output ./plans/new-product-prd.md
 ```
 
 ## Workspace Layout
@@ -109,14 +122,23 @@ Output rules:
 - `--output path/to/file.md`: write exactly that file and place `.docloop/` beside it.
 - `--output path/to/dir` or `--output path/to/dir/`: write `path/to/dir/SAD.md` or `path/to/dir/PRD.md`.
 
+Workdir rules:
+
+- `--workdir path/to/project`: use that directory as read-only grounding context so the writer and verifier can inspect the current implementation when grounding decisions.
+- `--no-workdir`: do not provide any implementation grounding context; treat the run as greenfield.
+- If neither flag is supplied, DocLoop prompts interactively so the user must choose between current-directory grounding and greenfield mode.
+- `--workdir` is independent from `--output`. The target document and `.docloop/` artifacts still live beside the resolved output file.
+- Git checkpointing applies to the target document and `.docloop/` artifact root, not to the separate grounding `--workdir`.
+- The grounding `--workdir` is read-only context. DocLoop treats changes there as an error.
+
 ## Loop Behavior
 
 For each cycle, `docloop.py`:
 
 1. Stages and commits the current target document and `.docloop/` state as a pre-cycle snapshot.
-2. Runs the writer using `.docloop/prompt.md` with the full workspace context.
+2. Runs the writer with an explicit execution cwd, while passing absolute paths for the target document and `.docloop/` control files plus either a grounding workdir or a greenfield marker.
 3. If the writer asks a question, the human answer is appended to `.docloop/context.md`, committed, and the cycle restarts.
-4. Commits any writer edits, then runs the verifier using `.docloop/verifier_prompt.md` against the same full workspace context.
+4. Commits any writer edits, then runs the verifier against the same grounding configuration.
 5. If the verifier asks a question, the human answer is appended to `.docloop/context.md`, committed, and the cycle restarts.
 6. If the verifier does not pass the document, it must update `.docloop/criteria.md` and append actionable feedback to `.docloop/progress.txt` for the writer, then the next cycle begins.
 7. If the verifier emits canonical `{"kind":"promise","promise":"COMPLETE"}` in `<loop-control>` as the final control block, or the legacy final-line `<promise>COMPLETE</promise>`, the final state is committed and the script exits `0`.
@@ -166,6 +188,9 @@ Update-mode questions are stricter:
 - Git commits are skipped when there is nothing to commit.
 - Human clarifications are appended to `.docloop/context.md`; they do not overwrite prior context.
 - The writer and verifier both read the same full workspace context; the verifier is not run on a reduced or clean-room context.
+- The current working directory seen by nested Codex may differ from both the output location and the grounding workdir. Doc-Loop passes absolute paths so managed files remain addressable when the roots differ.
+- When `--workdir` is provided, Doc-Loop treats it as read-only grounding context and fails the run if that tree changes during a writer or verifier phase.
+- When `--no-workdir` is used, Doc-Loop runs Codex from a temporary empty execution directory and instructs the agents to treat the task as greenfield.
 - Update mode uses the same full context plus `.docloop/update_request.md` and `.docloop/update_baseline.md`.
 
 
